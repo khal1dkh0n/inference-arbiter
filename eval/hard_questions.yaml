@@ -1,0 +1,797 @@
+# Hard closed-book set, draft v2 (26 cases). Schema and scoring rules: eval/README.md
+#
+# Same schema as eval/golden_questions.yaml, so scripts/run_eval.py --golden loads it unchanged.
+#
+# Executable cases are marked with `category: executable` (ids HX-*): the answer is a value a
+# short Python program computes from data given in the question. Select them with
+# `--category executable`. The other categories are the existing `reasoning`, `domain` and `trap`.
+#
+# `reference` is an extra field the loader ignores: the standard-library program under
+# eval/hard_reference/ that prints `expected_answer`. Every executable case has one, and so does
+# every other case whose answer is computed. tests/test_hard_questions.py re-runs them all.
+#
+# No answer here was recalled: each computed answer is the printed output of its reference
+# program. All input data is synthetic (the PAN 4761739001010119 is a public test number).
+# Short hex results (CRC, LRC) are asked for as decimal integers so the numeric grader can check
+# them; a bare two-digit hex string cannot be graded safely by substring.
+version: 1
+cases:
+  # ---- executable (15) ----
+  - id: HX-01
+    question: |
+      The hex string below is one BER-TLV data object as used in EMV. Parse it with these rules.
+
+      Tag: one byte, unless the low five bits of the first byte are all 1 (first byte AND 0x1F = 0x1F); then more tag bytes follow, and the tag continues for as long as the byte just read has its top bit (0x80) set, the first byte without it being the last tag byte.
+      Constructed: if bit 0x20 of the first tag byte is set, the value is itself a sequence of TLV objects; otherwise the value is primitive, opaque data that must not be parsed further.
+      Length: one byte below 0x80 is the length; 0x81 means the next one byte is the length; 0x82 means the next two bytes are the length, big-endian.
+
+      7781849F2701809F360201A79F4B3079C4121FC60857DFFEFC74B999CC85F1909F0206000000004200AC46C8BCDF728E70FE5F2A0208406CCE861E33E6B0EA9F10120110A040032200009F0206000000990000FFBF0C139F4D020B0A9F02060000000187505F2A0209789F26086FE62AADA4D044EA57104761739001010119D291220112345678
+
+      Exactly one data object with tag 9F02 (Amount, Authorised: 6 bytes of BCD, in minor units) exists in the parsed structure. What amount does it hold? Give it as a decimal integer of minor units, on a final line of the form "Answer: <integer>".
+    expected_answer: "18750"
+    match:
+      type: numeric
+      value: 18750
+      tolerance: 0
+    category: executable
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HX-01.py
+    notes: Two-byte tags, a long-form (0x81) length on the outer template and a nested BF0C template. The byte sequence 9F0206 also occurs inside the primitive values of 9F4B (amount 4200) and 9F10 (amount 990000), so a substring search gives a wrong amount; only a real walk finds 18750. Computed by the reference program.
+
+  - id: HX-02
+    question: |
+      The hex string below is one BER-TLV data object. Parse it completely with these rules.
+
+      Tag: one byte, unless the low five bits of the first byte are all 1 (first byte AND 0x1F = 0x1F); then more tag bytes follow, and the tag continues for as long as the byte just read has its top bit (0x80) set, the first byte without it being the last tag byte.
+      Constructed: if bit 0x20 of the first tag byte is set, the value is itself a sequence of TLV objects; otherwise the value is primitive and is not parsed further.
+      Length: one byte below 0x80 is the length; 0x81 means the next one byte is the length; 0x82 means the next two bytes are the length, big-endian. A long form may be used for a small length.
+      Padding: a 0x00 byte where a tag is expected, inside any constructed value, is padding and is skipped.
+
+      E181539F1A020826008407A0000000041010A58132500544454249548701010000BF0C8200129F4D020B0A004203465F20DF8129039F0A049F380C9F66049F02069F37045F2A025F2D04656E6465DF813004A5038701
+
+      Counting at every nesting level, how many value bytes in total are held by primitive data objects? (Tag bytes, length bytes, padding bytes and the constructed objects themselves are not counted.) Give a final line of the form "Answer: <integer>".
+    expected_answer: "43"
+    match:
+      type: numeric
+      value: 43
+      tolerance: 0
+    category: executable
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HX-02.py
+    notes: Three levels of nesting (E1, A5, BF0C), three-byte tags (DF8129, DF8130), non-minimal long-form lengths (81 32, 82 0012), padding bytes, and primitive values that look like TLV (9F38 holds a DOL, DF8130 holds A5 03 87 01). Ten primitives with lengths 2+7+5+1+2+3+3+12+4+4 = 43. Computed by the reference program.
+
+  - id: HX-03
+    question: |
+      A card returns this Data Object List (a sequence of tag and length pairs, with no values; tags are one byte unless the low five bits of the first byte are all 1, in which case the tag is two bytes):
+
+      9F02049F03069F1A0395055F2A029A039C019F37045F200A9F4C049F35019F21029F1E04
+
+      The terminal holds these values (tag, format, value in hex):
+
+      9F02  n   000000018750
+      9F03  n   000000000000
+      9F1A  n   0826
+      95    b   0080008000
+      5F2A  n   0978
+      9A    n   271122
+      9C    n   00
+      9F37  b   3C91A7E2
+      5F20  an  444F452F4A
+      9F35  n   22
+      9F21  n   143005
+      9F1E  an  54524D3030303432
+
+      Build the data field: the values in the order the list asks for them, each made exactly as long as the list asks, concatenated with no tags or lengths. Rules: if the terminal has no value for a tag, use zero bytes (0x00) of the requested length. If the terminal's value is longer than requested, a format n value loses its leftmost bytes and any other format loses its rightmost bytes. If it is shorter than requested, a format n value is padded on the left with 0x00 and any other format is padded on the right with 0x00.
+
+      Give the resulting data field as one uppercase hex string with no spaces, on a final line of the form "Answer: <hex>".
+    expected_answer: "0001875000000000000000082600800080000978271122003C91A7E2444F452F4A00000000000000000022300554524D30"
+    match:
+      type: contains
+      any_of:
+        - "0001875000000000000000082600800080000978271122003C91A7E2444F452F4A00000000000000000022300554524D30"
+        - "00 01 87 50 00 00 00 00 00 00 00 08 26 00 80 00 80 00 09 78 27 11 22 00 3C 91 A7 E2 44 4F 45 2F 4A 00 00 00 00 00 00 00 00 00 22 30 05 54 52 4D 30"
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-03.py
+    notes: DOL processing with every rule exercised. 9F02 is truncated on the left (n), 9F1A padded on the left, 5F20 padded on the right, 9F4C is absent and zero-filled, 9F21 truncated on the left, 9F1E truncated on the right. The answer is 49 bytes; `contains` accepts the string with no spaces or with one space between bytes, in any letter case, and is long enough that no wrong answer can hold it by accident. The padding and truncation rules are stated in the question (they follow EMV Book 3 section 5.4 as recalled, but nothing depends on the recall). Computed by the reference program.
+
+  - id: HX-04
+    question: |
+      Below is one ISO 8583 message in an all-ASCII encoding: a 4-digit message type, then the primary bitmap as 16 hex characters, then the data elements in ascending order. Bit 1 is the most significant bit of the bitmap. If bit 1 is set, a secondary bitmap (16 more hex characters, covering data elements 65 to 128) follows the primary bitmap, before the first data element.
+
+      Data element formats used by this interface (length in characters; LLVAR means a 2-digit decimal length followed by that many characters):
+
+      2 LLVAR, 3 fixed 6, 4 fixed 12, 7 fixed 10, 11 fixed 6, 12 fixed 6, 13 fixed 4, 18 fixed 4, 22 fixed 3, 25 fixed 2, 32 LLVAR, 35 LLVAR, 37 fixed 12, 41 fixed 8, 42 fixed 15, 49 fixed 3, 100 LLVAR, 102 LLVAR
+
+      0200F238448128C080000000000014000000164761739001010119003000000000018750112214300500412715300511225411051000840012877314761739001010119D29122011234567632614004127414001280004140012877009781141400128774100041400128
+
+      What is the value of data element 41? Give it on a final line of the form "Answer: <value>".
+    expected_answer: "41400128"
+    match:
+      type: numeric
+      value: 41400128
+      tolerance: 0
+    category: executable
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HX-04.py
+    notes: Needs the bitmap decoded correctly (elements 2, 3, 4, 7, 11, 12, 13, 18, 22, 25, 32, 35, 37, 41, 42, 49, 100, 102), the secondary bitmap skipped, and three LLVAR fields walked before element 41. The neighbouring fields are built from the same digit groups (32 is 40012877, 42 is 000414001287700), so a misaligned parse gives a plausible wrong value. Element 41 is all digits here, so the numeric grader checks it. Computed by the reference program, which also asserts the parse consumes the whole message.
+
+  - id: HX-07
+    question: |
+      Compute a 16-bit CRC over the 14 bytes given below in hex, with these parameters: polynomial 0x1021, initial value 0xFFFF, bits processed most significant first (no input reflection, no output reflection), no final XOR. (With these parameters the CRC of the 9 ASCII bytes "123456789" is 0x29B1.)
+
+      9F02060000000187505F2A020978
+
+      Give the CRC as a decimal integer between 0 and 65535, on a final line of the form "Answer: <integer>".
+    expected_answer: "41925"
+    match:
+      type: numeric
+      value: 41925
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-07.py
+    notes: 41925 is 0xA3C5. All parameters and the standard check value are in the question, so nothing is recalled; the work is 112 shift-and-XOR steps, which is where a model without code execution slips. Asked for in decimal so the numeric grader can check it. Computed by the reference program, which also asserts the 0x29B1 check value.
+
+  - id: HX-08
+    question: |
+      A terminal sends frames of the form STX (0x02), data bytes, ETX (0x03), LRC. The LRC is the XOR of every byte after STX up to and including ETX; STX itself is not included. Here is a frame without its LRC byte, in hex:
+
+      02303230307C343736313733393030313031303131397C3030303030303031383735307C3937387CB9BCD408CC6C03
+
+      What is the LRC byte? Give it as a decimal integer between 0 and 255, on a final line of the form "Answer: <integer>".
+    expected_answer: "69"
+    match:
+      type: numeric
+      value: 69
+      tolerance: 0
+    category: executable
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HX-08.py
+    notes: 69 is 0x45. XOR of 46 bytes with STX excluded and ETX included (including STX gives 71, excluding ETX gives 70). Asked for in decimal because a two-character hex answer cannot be graded safely by substring. Computed by the reference program.
+
+  - id: HX-10
+    question: |
+      This Python 3 code converts decimal amount strings to minor units and adds them up:
+
+      def to_minor_units(amount):
+          return int(float(amount) * 100)
+
+      def batch_total(amounts):
+          return sum(to_minor_units(amount) for amount in amounts)
+
+      print(batch_total(["19.99", "4.35", "1.15", "0.29", "8.20", "2.50", "1.10", "16.90", "0.57", "1.13"]))
+
+      What exactly does it print on a standard CPython build (IEEE 754 double precision floats)? Give a final line of the form "Answer: <integer>".
+    expected_answer: "5610"
+    match:
+      type: numeric
+      value: 5610
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-10.py
+    notes: The exact sum is 5618. int() truncates, and eight of the ten products fall just below the integer in binary floating point (1998, 434, 114, 28, 819, 250, 110, 1689, 56, 112), so the code prints 5610. Which amounts lose a cent cannot be reasoned out reliably without running it, which is the point of the case. Verified by running the code.
+
+  - id: HX-11
+    question: |
+      This Python 3 function is meant to return the Luhn check digit for a payload (the number without its check digit). It contains one bug.
+
+      def check_digit(payload):
+          total = 0
+          for i, ch in enumerate(reversed(payload)):
+              d = int(ch)
+              if i % 2 == 0:
+                  d = d * 2 % 9
+              total += d
+          return (10 - total % 10) % 10
+
+      It is called on these three payloads, in this order: "79927398719", "4929939187355", "371449635398439".
+
+      Write down the three digits the function returns as written, followed by the three digits a correct Luhn check-digit function would return for the same payloads, as one 6-digit string (buggy results first, then correct results). Give it on a final line of the form "Answer: <six digits>".
+    expected_answer: "205527"
+    match:
+      type: numeric
+      value: 205527
+      tolerance: 0
+    category: executable
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HX-11.py
+    notes: The bug is `d * 2 % 9` in place of "double, then subtract 9 if above 9". The two agree for every digit except 9, where the buggy form gives 0 and the correct form gives 9. Each payload has a 9 in a doubled position, so all three results differ (buggy 2, 0, 5; correct 5, 2, 7). Verified by running both versions.
+
+  - id: HX-12
+    question: |
+      Compute the total interchange for the batch below.
+
+      Each row is: row number, card type (CD consumer debit, CC consumer credit, CM commercial), region (D domestic, X cross-border), transaction currency, and the transaction amount as 12 BCD digits in the minor unit of that currency.
+
+      Minor-unit exponents: USD 2, EUR 2, JPY 0, KWD 3.
+
+      Interchange rate, percent of the amount: CD D 0.20, CD X 1.15, CC D 0.30, CC X 1.50, CM D 1.75, CM X 2.00.
+
+      For each row, the fee is the rate applied to the amount, rounded to a whole minor unit of the transaction currency with half-to-even rounding. Each rounded fee is then converted to EUR at these rates, without rounding: 1 USD = 0.92 EUR, 1 JPY = 0.0061 EUR, 1 KWD = 2.98 EUR. The converted fees are added up and the total is rounded once, half-to-even, to the euro cent.
+
+      01 CD X KWD 000000401831
+      02 CC D JPY 000000286463
+      03 CC X USD 000000200699
+      04 CD D USD 000000031250
+      05 CM X EUR 000000044270
+      06 CC X JPY 000000222579
+      07 CD X USD 000000096353
+      08 CD D USD 000000217716
+      09 CC D USD 000000146397
+      10 CC X JPY 000000278832
+      11 CC X EUR 000000007700
+      12 CD X EUR 000000248392
+      13 CM D KWD 000000332514
+      14 CD D EUR 000000040584
+      15 CD D EUR 000000086244
+      16 CM D USD 000000074277
+      17 CC X JPY 000000124050
+      18 CM D JPY 000000002600
+      19 CC D USD 000000009005
+      20 CD D KWD 000000387185
+      21 CD D JPY 000000043734
+      22 CM D JPY 000000095787
+      23 CM X USD 000000045832
+      24 CM D KWD 000000816347
+
+      What is the total interchange in euro cents? Give a final line of the form "Answer: <integer number of euro cents>".
+    expected_answer: "25775"
+    match:
+      type: numeric
+      value: 25775
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-12.py
+    notes: Twenty-four rows, each needing a rate lookup, a minor-unit exponent (0, 2 or 3 decimals), a half-even rounding in the transaction currency and a currency conversion, then one rounding of the total. Rows 04, 11 and 18 land exactly on half a minor unit (62.5, 115.5, 45.5). Nothing is recalled; the difficulty is volume and keeping the exponents straight. Replaced the 12-row single-currency rounding case of the first draft, which the mid tier answered in 12 seconds. Computed with decimal arithmetic by the reference program.
+
+  - id: HX-13
+    question: |
+      This Python 3 function is meant to return the tags of all BER-TLV objects in a buffer, descending into constructed objects. It has bugs.
+
+      def tags(data):
+          out = []
+          i = 0
+          while i < len(data):
+              tag = data[i]
+              i += 1
+              if tag & 0x1F == 0x1F:
+                  tag = (tag << 8) | data[i]
+                  i += 1
+              length = data[i]
+              i += 1
+              if length & 0x80:
+                  length = data[i]
+                  i += 1
+              out.append(tag)
+              if not tag & 0x20:
+                  i += length
+          return out
+
+      data = bytes.fromhex("7082002E9F4681039F02065A0847617390010101195F3401019F0702FF008E0A00000000000000001F039F0D05B450840000")
+      print(sum(tags(data)))
+
+      What exactly does this print? Trace the code as written; do not report what a correct parser would give. Give a final line of the form "Answer: <integer>".
+    expected_answer: "32689"
+    match:
+      type: numeric
+      value: 32689
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-13.py
+    notes: Two bugs. A long-form length always takes exactly one following byte as the length, so 82 00 2E is read as length 0 and the parser loses sync. The constructed test is applied to the combined two-byte tag, so 5F34 (low byte 0x34) is treated as constructed. The function returns [0x70, 0x2E, 0x81, 0x5A, 0x5F34, 0x01, 0x00, 0x00, 0x00, 0x1F03], sum 32689; a correct parser would give 0x70, 0x9F46, 0x5A, 0x5F34, 0x9F07, 0x8E, 0x9F0D. The last skip runs past the end of the buffer, which ends the loop without an error. Replaced the one-line operator-precedence case of the first draft (answered in 7 seconds). Verified by running the function.
+
+  - id: HX-14
+    question: |
+      A card scheme signs a 16-byte data block with RSA. To recover the block, compute S^3 mod N, where S is the signed value and N the modulus, and write the result as 16 bytes, big-endian.
+
+      N = B2764CD65A5BE7B2050CB0D5439DC0CD (hex)
+      S = A6F67D445A09812EF39CCF5A55E7639D (hex)
+
+      The recovered block has this layout: byte 1 is the header 0x6A; byte 2 is the format; bytes 3 to 6 are the issuer identifier as 8 BCD digits; bytes 7 and 8 are the expiry (MMYY, BCD); bytes 9 to 11 are a serial number; bytes 12 to 15 are other data; byte 16 is the trailer 0xBC.
+
+      What is the issuer identifier? Give its 8 digits on a final line of the form "Answer: <eight digits>".
+    expected_answer: "52846013"
+    match:
+      type: numeric
+      value: 52846013
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-14.py
+    notes: Toy version of EMV public key certificate recovery (128-bit modulus, exponent 3). One line of Python (pow(S, 3, N)); by hand it is two 39-digit multiplications and reductions, which is where a model without code execution fails. The recovered block is 6A 02 52846013 1230 00A7F3 01013C5E BC, and the reference program asserts the header and trailer. The layout is stated in the question and is a simplification, not the real EMV certificate format.
+
+  - id: HX-15
+    question: |
+      Here are twenty numbers of different lengths. Decide for each whether the whole number passes the Luhn check.
+
+      3501117735686
+      5596263776164820
+      6993937996084
+      2129442768946
+      340635187430734
+      3362552682627480274
+      39443140731311
+      3572672121244910
+      39451326605715
+      3520818661866891393
+      6552406993525862
+      263249215191228
+      2681426349293
+      5272197304730819
+      6495672206917495304
+      5158159358259
+      6507326541946054
+      5760124383339923
+      2641124557258307
+      2947681864816791
+
+      Take the last four digits of each number that passes, read them as a number between 0 and 9999, and add those numbers up. What is the sum? Give a final line of the form "Answer: <integer>".
+    expected_answer: "42116"
+    match:
+      type: numeric
+      value: 42116
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-15.py
+    notes: Six of the twenty pass (2129442768946, 6552406993525862, 5272197304730819, 5158159358259, 5760124383339923, 2641124557258307); 8946 + 5862 + 819 + 8259 + 9923 + 8307 = 42116. The failing numbers were made from valid ones by a wrong check digit, an adjacent swap or one changed digit, so each one needs the full check, and the lengths vary between 13 and 19. One wrong verdict changes the sum. Replaced the five-payload check digit case of the first draft (answered in 24 seconds). Computed by the reference program.
+
+  - id: HX-16
+    question: |
+      A payment provider signs each webhook like this: the signed message is the timestamp, a full stop, and the raw request body, encoded as UTF-8; the signature is HMAC-SHA256 of that message with the endpoint's signing key (the key string encoded as UTF-8).
+
+      Signing key (a test value): test-signing-key-0001
+      Timestamp: 1795434000
+      Raw body, exactly as below, with no trailing newline:
+      {"id":"evt_test_0042","type":"payment.captured","amount":18750,"currency":"EUR"}
+
+      Compute the signature. Take its first four bytes and read them as an unsigned big-endian integer. Give that integer on a final line of the form "Answer: <integer>".
+    expected_answer: "3174140192"
+    match:
+      type: numeric
+      value: 3174140192
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-16.py
+    notes: Webhook signature check. Three lines with hmac and hashlib; not feasible by hand, so a model without code execution can only guess or time out. Added after the second calibration run, in which the mid tier answered every case it finished. The key is a made-up test string, not a secret. The first four bytes are asked for as a decimal integer (0xBD31A920) so the numeric grader can check them. Computed by the reference program.
+
+  - id: HX-17
+    question: |
+      The hex string below is an EMV record: one constructed template (tag 70) holding primitive BER-TLV objects with one- or two-byte tags (a tag has a second byte when the low five bits of its first byte are all 1) and one-byte lengths.
+
+      701E5A0847617390010101195F24032912315F3401019F0702FF005F28020826
+
+      Compute the SHA-1 hash of the concatenation of the value fields (values only, no tags or lengths) of tags 5A, 5F24 and 9F07, in the order they appear in the record. Take the first four bytes of the hash and read them as an unsigned big-endian integer. Give that integer on a final line of the form "Answer: <integer>".
+    expected_answer: "2728216525"
+    match:
+      type: numeric
+      value: 2728216525
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-17.py
+    notes: A short TLV parse followed by a hash, in the shape of the static-data hash used in EMV offline data authentication. The hashed input is 13 bytes (4761739001010119 291231 FF00). The parse is easy; the SHA-1 is not feasible by hand. Added after the second calibration run. The first four bytes are 0xA29D17CD. Computed by the reference program.
+
+  - id: HX-18
+    question: |
+      The text below is a settlement file that was compressed with zlib (RFC 1950, deflate) and then base64-encoded. Decoded and decompressed it is ASCII CSV with the header line merchant,currency,amount_minor followed by one line per merchant.
+
+      eNo1j7sOwjAMAPd8S4bY8XOHMQuIGaGqEgxtpQoG/h43EaNP57O8zPv0fKzvPH32fV6nb34s22d935fXuu2pEarl8+2SCUkKBFDFDgSdWVNDgmGgALmnpqiSb9dTAKpcUnND6iB89ljxAsNwxhICMZeRgAJHUyuPplUEkNQqOXWgIAwcwCv2BBn50RBm6MAckcNwkWGYusdsYv8EoMUnID6O1IpK+gNv7T8H
+
+      What is the sum of amount_minor over the lines whose currency is EUR? Give a final line of the form "Answer: <integer>".
+    expected_answer: "4118473"
+    match:
+      type: numeric
+      value: 4118473
+      tolerance: 0
+    category: executable
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HX-18.py
+    notes: Fourteen data lines, eight of them EUR. Two lines of Python with base64 and zlib; inflating a deflate stream by hand is not feasible. Added after the second calibration run. Computed by the reference program.
+
+  # ---- reasoning (6) ----
+  - id: HR-08
+    question: |
+      A shared account balance starts at 100. Three workers run concurrently. Each numbered step below is atomic, each worker runs its own steps in order, and the steps of different workers may interleave in any way. The variables x, y and z are private to their worker. "write v" sets the balance to v.
+
+      W1:  1. x = read balance   2. write x + 50
+      W2:  1. y = read balance   2. write y * 2
+      W3:  1. z = read balance   2. if z >= 150 then write z - 150, otherwise write z + 5   3. z = read balance   4. write z - 20
+
+      Over all possible interleavings, the final balance takes a number of distinct values. What is the sum of those distinct values, each counted once? Give a final line of the form "Answer: <integer>".
+    expected_answer: "4405"
+    match:
+      type: numeric
+      value: 4405
+      tolerance: 0
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HR-08.py
+    notes: There are 420 interleavings and 26 distinct final balances (-40, -20, 0, 30, 80, 85, 100, 130, 135, 150, 155, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300, 310), which sum to 4405. Lost updates make most of them; the branch in W3 step 2 depends on what the other workers have written by then. Missing or inventing a single reachable value changes the sum. Computed by exhaustive enumeration in the reference program.
+
+  - id: HR-09
+    question: |
+      A single register holds an integer, initially 0. Clients C1, C2 and C3 call write(v) and read on it. Each line of a history is one operation: the client, the operation (for a read, the value it returned), and the times at which it was invoked and at which it returned, as "invoked-returned". All times within a history are distinct.
+
+      A history is linearizable if every operation can be given a single instant, somewhere between its invocation and its return, such that executing the operations one at a time in the order of those instants makes every read return the value of the latest write before it (or 0 if there is none).
+
+      H1:
+      C3 read -> 0   1-7
+      C1 read -> 0   2-3
+      C1 read -> 3   4-10
+      C2 write(1)    5-6
+      C3 write(2)    8-12
+      C2 write(3)    9-14
+      C1 read -> 2   11-13
+
+      H2:
+      C1 read -> 0   1-2
+      C3 read -> 1   3-5
+      C2 write(1)    4-10
+      C1 write(2)    6-7
+      C3 read -> 2   8-13
+      C1 write(3)    9-11
+      C2 read -> 3   12-14
+
+      H3:
+      C1 read -> 0   1-3
+      C3 read -> 3   2-11
+      C2 write(1)    4-7
+      C1 write(2)    5-6
+      C2 write(3)    8-12
+      C1 read -> 2   9-10
+      C3 read -> 2   13-14
+
+      H4:
+      C1 write(1)    1-10
+      C2 write(2)    2-11
+      C3 read -> 2   3-4
+      C3 read -> 1   5-6
+      C3 read -> 2   7-8
+      C1 read -> 2   12-13
+
+      H5:
+      C1 write(1)    1-10
+      C2 write(2)    2-11
+      C3 read -> 2   3-4
+      C3 read -> 1   5-6
+      C3 read -> 1   7-8
+      C1 read -> 1   12-13
+
+      For each history, say whether it is linearizable. Finish with a final line of the form "Answer: " followed by five letters, Y or N, for H1 to H5 in order with nothing between them (for example "Answer: NNYYN").
+    expected_answer: "YYNNY"
+    match:
+      type: contains
+      any_of:
+        - "YYNNY"
+        - "Y Y N N Y"
+        - "Y, Y, N, N, Y"
+        - "Y,Y,N,N,Y"
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HR-09.py
+    notes: H1 is linearizable (write 1, write 3, read 3, write 2, read 2, with both reads of 0 first). H2 is linearizable (write 1 takes effect early in its long interval, then read 1, write 2, read 2, write 3, read 3). H3 is not - write 2 returns before write 3 is invoked, and write 3 returns at 12, so the read at 13-14 must return 3. H4 is not - the reads 2, 1, 2 are sequential, and going back to 2 would need write 2 to take effect twice. H5 is linearizable (write 2, read 2, write 1, then three reads of 1). The definition is stated in the question. A random guess passes one time in 32. Computed by exhaustive search in the reference program.
+
+  - id: HR-10
+    question: |
+      A merchant must route each of nine card transactions to exactly one of three acquirers so that the total fee is as low as possible.
+
+      Transactions (number, amount, card type):
+      1  800.00  debit
+      2  350.00  credit
+      3  800.00  credit
+      4  1,250.00  credit
+      5  750.00  debit
+      6  250.00  debit
+      7  750.00  credit
+      8  100.00  debit
+      9  1,450.00  debit
+
+      Acquirer A: 1.80% of the amount for credit and 0.60% for debit, plus 0.10 per transaction. The total amount routed to A must not exceed 2,500.00.
+      Acquirer B: 1.50% of the amount for credit and 0.90% for debit, plus 0.25 per transaction. If the total amount routed to B is 3,000.00 or more, both percentages are reduced by 0.30 percentage points (to 1.20% and 0.60%) for every transaction routed to B.
+      Acquirer C: 1.20% of the amount for any card, with no per-transaction fee. If at least one transaction is routed to C, C charges at least 30.00 in total: its fee is the larger of its percentage fees and 30.00.
+
+      What is the lowest possible total fee? Give a final line of the form "Answer: <amount>".
+    expected_answer: "58.85"
+    match:
+      type: numeric
+      value: 58.85
+      tolerance: 0
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HR-10.py
+    notes: The optimum routes 1, 5 and 9 to B (exactly 3,000.00, which earns the discount), 6 and 8 to A, and the four credit transactions to C (3,150.00, 37.80, above the minimum). B costs 18.75, A costs 2.30, C costs 37.80, total 58.85. The next best routing costs 59.00. Sending each transaction to its cheapest standalone rate misses the volume discount. All fees are whole cents, so no rounding rule is needed. Computed by exhaustive search over the 19,683 routings in the reference program.
+
+  - id: HR-11
+    question: |
+      Four processes exchange messages. The events of each process are listed in the order they happen on that process. "send m to P" sends message m to process P, "receive m" receives it, and "local" is an internal event. Every message is sent once and received once.
+
+      P1: send m5 to P2, send m6 to P3, local, local, local
+      P2: send m4 to P4, local, receive m5, local, local
+      P3: receive m1, send m2 to P4, receive m3, receive m6
+      P4: send m1 to P3, send m3 to P3, local, receive m4, receive m2
+
+      Event a happened before event b if a and b are on the same process and a comes first, or a is the sending of a message and b is its receipt, or there is an event c such that a happened before c and c happened before b. Two different events are concurrent if neither happened before the other.
+
+      There are 19 events and so 171 unordered pairs of different events. How many of those pairs are concurrent? Give a final line of the form "Answer: <integer>".
+    expected_answer: "120"
+    match:
+      type: numeric
+      value: 120
+      tolerance: 0
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HR-11.py
+    notes: 51 pairs are ordered by happened-before and 120 are concurrent. The 36 same-process pairs are all ordered; the other 15 ordered pairs come from the six messages and their transitive consequences (for example P4's first send precedes everything on P3, and P2's first send precedes P4's last two events). The definition is stated in the question. Computed by transitive closure in the reference program.
+
+  - id: HR-12
+    question: |
+      Five banks hold these opening balances at a real-time gross settlement system (amounts in millions):
+
+      A 50
+      B 60
+      C 10
+      D 80
+      E 40
+
+      Twelve payments are queued:
+
+      1.  A pays B 30
+      2.  C pays D 50
+      3.  D pays A 110
+      4.  B pays A 50
+      5.  D pays C 40
+      6.  D pays B 30
+      7.  B pays D 40
+      8.  B pays A 20
+      9.  B pays E 40
+      10. B pays C 70
+      11. B pays E 40
+      12. B pays D 60
+
+      A payment can settle only if the paying bank's balance at that moment is at least the amount of the payment; no overdraft is allowed. Settling moves the amount from the payer to the payee at once. Payments settle one at a time, in any order the operator chooses, each at most once, and a payment may be left unsettled.
+
+      What is the largest total value of payments that can be settled? Give a final line of the form "Answer: <integer>".
+    expected_answer: "380"
+    match:
+      type: numeric
+      value: 380
+      tolerance: 0
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HR-12.py
+    notes: The queue totals 580 and cannot all settle. Settling whatever is possible in queue order, repeated until nothing moves, reaches only 260; the best order reaches 380. B is the bottleneck, with seven outgoing payments worth 320 against 60 of its own and at most 60 that can come in, so which of B's payments are chosen decides the result. Computed by exhaustive search over reachable sets of settled payments in the reference program.
+
+  - id: HR-13
+    question: |
+      Six transactions, T1 to T6, run in the interleaved schedule below. R(X) is a read of item X and W(X) is a write of item X. All six commit.
+
+      1.  T3 W(E)
+      2.  T3 W(D)
+      3.  T5 W(C)
+      4.  T5 R(D)
+      5.  T6 R(A)
+      6.  T4 R(B)
+      7.  T3 R(A)
+      8.  T6 R(B)
+      9.  T4 R(D)
+      10. T1 R(D)
+      11. T6 R(E)
+      12. T1 W(E)
+      13. T2 R(D)
+      14. T4 W(B)
+      15. T1 R(E)
+      16. T2 R(E)
+      17. T5 R(E)
+
+      Two operations conflict if they belong to different transactions, act on the same item, and at least one of them is a write. A serial order of the six transactions is conflict-equivalent to the schedule if every pair of conflicting operations appears in the same relative order in both.
+
+      How many of the 720 serial orders are conflict-equivalent to this schedule? If the schedule is not conflict-serializable, the answer is 0. Give a final line of the form "Answer: <integer>".
+    expected_answer: "8"
+    match:
+      type: numeric
+      value: 8
+      tolerance: 0
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    reference: eval/hard_reference/HR-13.py
+    notes: The conflicts give nine precedence constraints - T3 before each of T1, T2, T4, T5 and T6 (through D and E), T6 before T1 and T1 before T2 and T5 (through E), and T6 before T4 (through B). The graph has no cycle, and 8 of the 720 serial orders satisfy all nine. T3 is first, T6 second; then T4 can sit in any of four places among T1, T2, T5, and T2 and T5 can swap. The answer is a small integer, so a guess can pass; read the working when it matters. Counted by checking all 720 orders in the reference program.
+
+  # ---- domain (2) ----
+  - id: HD-03
+    question: |
+      An EMV terminal builds the 5-byte Terminal Verification Results (TVR) and then runs terminal action analysis. Use only the rules below. Bytes are numbered 1 to 5 from the left; every bit not mentioned stays 0.
+
+      TVR bits:
+      Byte 1: 0x80 offline data authentication was not performed; 0x40 static data authentication failed.
+      Byte 2: 0x80 card and terminal have different application versions; 0x40 expired application; 0x20 application not yet effective; 0x08 new card.
+      Byte 3: 0x80 cardholder verification was not successful; 0x20 PIN try limit exceeded; 0x10 PIN entry required and PIN pad not present; 0x04 online PIN entered.
+      Byte 4: 0x80 transaction exceeds floor limit; 0x40 lower consecutive offline limit exceeded; 0x20 upper consecutive offline limit exceeded; 0x10 transaction selected randomly for online processing; 0x08 merchant forced transaction online.
+
+      How the bits are set:
+      - "Expired application" is set if the transaction date is after the application expiration date. "Application not yet effective" is set if the transaction date is before the application effective date.
+      - "New card" is set if the Last Online ATC Register is zero.
+      - "Transaction exceeds floor limit" is set if the transaction amount plus the amount of the most recent transaction with the same card in the terminal's log is greater than or equal to the floor limit.
+      - "Lower consecutive offline limit exceeded" is set if the Application Transaction Counter (ATC) minus the Last Online ATC Register is greater than the lower limit; the upper bit likewise with the upper limit.
+      - If offline PIN is attempted when the PIN try counter is already zero, "PIN try limit exceeded" is set and the method is unsuccessful. If the CVM rule being applied does not allow moving on to another rule, "cardholder verification was not successful" is then set.
+
+      Terminal action analysis (OR and AND are bitwise over the 5 bytes):
+      1. If TVR AND (IAC-Denial OR TAC-Denial) is not all zero, the terminal requests an AAC.
+      2. Otherwise, if TVR AND (IAC-Online OR TAC-Online) is not all zero, the terminal requests an ARQC; if it is all zero, it requests a TC.
+      3. If an ARQC was requested but the terminal cannot go online: if TVR AND (IAC-Default OR TAC-Default) is not all zero the outcome is an AAC, otherwise a TC.
+
+      This transaction:
+      - Static data authentication was performed and succeeded.
+      - Application version number on the card 008C, in the terminal 008D.
+      - Application effective date 2027-04-01, application expiration date 2029-03-31, transaction date 2027-03-31.
+      - Amount 80.00. The terminal's log holds one earlier transaction with this card, for 20.00. Floor limit 100.00.
+      - ATC 0113 (hex), Last Online ATC Register 010E (hex). Lower consecutive offline limit 5, upper consecutive offline limit 8.
+      - The only CVM rule that applies is offline PIN, and it does not allow moving on to another rule. The card's PIN try counter is zero. The terminal has a PIN pad.
+      - The transaction was not selected randomly and the merchant did not force it online.
+
+      IAC-Denial   00 10 40 00 00
+      TAC-Denial   04 00 00 00 00
+      IAC-Online   F0 40 5C 40 00
+      TAC-Online   0C 08 00 B0 00
+      IAC-Default  F0 40 5C 40 00
+      TAC-Default  0C 08 20 30 00
+
+      Give (a) the TVR, (b) what the terminal requests in the first GENERATE AC, and (c) the outcome if the terminal then cannot go online. Finish with a final line of the form "Answer: <TVR as 10 hex digits> <request> <outcome>", for example "Answer: 0000000000 TC TC".
+    expected_answer: "00A0A08000 ARQC AAC"
+    match:
+      type: contains
+      any_of:
+        - "00A0A08000 ARQC AAC"
+        - "00 A0 A0 80 00 ARQC AAC"
+        - "00A0A08000, ARQC, AAC"
+        - "00 A0 A0 80 00, ARQC, AAC"
+    category: domain
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HD-03.py
+    notes: Byte 2 is A0 - versions differ (80) and the transaction date is one day before the effective date (20); the card is not expired and not new. Byte 3 is A0 - PIN try limit exceeded (20) and verification not successful (80). Byte 4 is 80 - 80.00 + 20.00 equals the floor limit, which counts; the ATC difference is 0x0113 - 0x010E = 5, which is not greater than 5, so neither velocity bit is set. The denial mask 04 10 40 00 00 misses the TVR, the online mask FC 48 5C F0 00 hits byte 4, and the default mask FC 48 7C 70 00 hits byte 3 (20), so ARQC and then AAC. The bit assignments and rules are stated in the question; they follow EMV Book 3 (Annex C5 and terminal action analysis) as recalled, simplified, and the answer depends only on what is stated. Computed by the reference program.
+
+  - id: HD-04
+    question: |
+      A card scheme's dispute rules (invented for this question) set these time limits:
+
+      1. Chargeback: the issuer may raise a chargeback up to 120 calendar days after the transaction's central processing date. The day after the central processing date is day 1.
+      2. Second presentment: the acquirer may respond up to 30 calendar days after the chargeback date. If that last day is not a business day, the limit moves forward to the next business day.
+      3. Pre-arbitration: the issuer may file up to 20 business days after the second presentment date. The first business day after the second presentment date is business day 1.
+      4. Arbitration: the acquirer may file up to 30 calendar days after the pre-arbitration date. If that last day is not a business day, the limit moves back to the previous business day.
+
+      Business days are Monday to Friday, except these scheme holidays: 2028-03-20, 2028-04-14, 2028-04-17 and 2028-05-01.
+
+      A transaction has central processing date 2027-10-21, which is a Thursday. Every party acts on the last day its limit allows. On what date is the arbitration filed? Give a final line of the form "Answer: YYYY-MM-DD".
+    expected_answer: "2028-05-19"
+    match:
+      type: contains
+      any_of:
+        - "2028-05-19"
+        - "19 May 2028"
+        - "May 19, 2028"
+    category: domain
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HD-04.py
+    notes: Chargeback on 2028-02-18 (120 days on). Thirty days later is Sunday 2028-03-19 (2028 is a leap year); Monday the 20th is a holiday, so the second presentment is on Tuesday 2028-03-21. Twenty business days from there skip Good Friday and Easter Monday (04-14 and 04-17) and end on Thursday 2028-04-20. Thirty days later is Saturday 2028-05-20, which moves back to Friday 2028-05-19. Forgetting 29 February, the holiday on the 20th, or the direction of the last adjustment each gives another date. The rules are invented and stated in the question. Computed with the datetime module by the reference program.
+
+  # ---- trap (3) ----
+  - id: HT-04
+    question: |
+      Our settlement file format says: each detail row has a sequence number, D for a debit (sale) or C for a credit (refund), and an amount. The trailer carries the number of detail rows and the batch total, where the batch total is the sum of the debits minus the sum of the credits. A batch whose trailer does not match its detail rows on both figures must be rejected, and no service fee is charged on a rejected batch. For an accepted batch the service fee is 0.35% of the batch total.
+
+      Operations have already run the reconciliation on this batch and told me it balances to the cent, so I only need the fee. What service fee do we charge for it?
+
+      01 D 412.80
+      02 D 96.15
+      03 D 1,204.00
+      04 C 318.45
+      05 D 57.30
+      06 D 733.90
+      07 D 240.00
+      08 D 88.75
+      09 C 142.60
+      10 D 615.25
+      11 D 39.99
+      12 D 1,050.00
+      13 D 264.10
+      14 D 507.20
+      TRAILER count 14 total 5,770.49
+    expected_answer: No fee can be charged, because the batch does not reconcile. The row count is 14, but debits minus credits come to 4,848.39 (debits 5,309.44, credits 461.05), not the trailer's 5,770.49. The trailer total is what you get by adding the two credits instead of subtracting them. By the stated rule the batch must be rejected and no service fee applies; 20.20 (0.35% of the trailer total) is not owed.
+    match:
+      type: rubric
+      criteria:
+        - The answer says the batch does not reconcile - the trailer total 5,770.49 does not match the detail rows.
+        - The answer gives the correct net total of the detail rows, 4,848.39 (debits minus credits), or equivalently the correct difference of 922.10 from the trailer total.
+        - The answer does not present a service fee as payable for this batch; it says the batch must be rejected or that no fee is charged (mentioning what 0.35% of a figure would be, clearly marked as not applicable, is allowed).
+      pass_rule: all criteria met
+    category: trap
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HT-04.py
+    notes: False premise that has to be checked rather than trusted. The trailer total equals the sum of all fourteen amounts with the two credits (rows 04 and 09) added instead of subtracted, so a check that ignores the D/C column confirms it. The tempting answer is 20.20, which is 0.35% of 5,770.49 rounded. The file format and fee are invented and stated in the question. The reference program prints "count=14 net=4848.39 trailer=5770.49 MISMATCH"; rubric-graded.
+
+  - id: HT-05
+    question: |
+      The hex string below is a BER-TLV message from a card. Parse it with these rules.
+
+      Tag: one byte, unless the low five bits of the first byte are all 1; then one more tag byte follows (no tag here is longer than two bytes).
+      Length: one byte below 0x80 is the length; 0x81 means the next one byte is the length.
+      Constructed: if bit 0x20 of the first tag byte is set, the value is a template, itself a sequence of TLV objects; otherwise the value is primitive.
+      Validity: every data object must lie entirely inside the value of the template that contains it. If the length of any object would take its value past the end of the enclosing template's value, the whole message is malformed; a malformed message must be rejected and no data element may be taken from it.
+
+      772B9F2608A1B2C3D4E5F60718BF0C085F2A0209789F02060000000249909F3602003C9F100706010A03A00000
+
+      What is the Amount, Authorised (tag 9F02, 6 bytes of BCD in minor units) that we should post for this message?
+    expected_answer: None. The message is malformed and must be rejected. Template BF0C declares a length of 8 bytes; inside it, 5F2A takes 5 bytes and the header of 9F02 (9F 02 06) takes the remaining 3, so the 6-byte value of 9F02 lies entirely outside BF0C. By the stated validity rule no data element may be taken from the message, so there is no amount to post (the bytes that follow, 000000024990, must not be used).
+    match:
+      type: rubric
+      criteria:
+        - The answer says the message is malformed or must be rejected, because the 9F02 object does not fit inside the BF0C template (BF0C is 8 bytes long and 9F02's value runs past its end).
+        - The answer does not give 24990 (or 249.90) as the amount to post; if it mentions that figure it says it must not be used.
+      pass_rule: all criteria met
+    category: trap
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HT-05.py
+    notes: False premise - the question assumes an amount exists. The outer template 77 has a correct length (43 bytes), and a search for 9F0206, or a walk that ignores template boundaries, finds 000000024990. A walk that keeps to each template's boundary finds that 9F02's value overruns BF0C. The validity rule is stated in the question. The reference program walks the message strictly and prints "MALFORMED"; rubric-graded.
+
+  - id: HT-06
+    question: |
+      This Java method splits an amount in minor units across weighted parts. It has been in production for a year splitting instalment plans, with an assertion after every call that the parts add up to the total. The assertion has never fired.
+
+      static long[] split(long totalMinor, int[] weights) {
+          long sum = 0;
+          for (int w : weights) sum += w;
+          long[] parts = new long[weights.length];
+          long allocated = 0;
+          for (int i = 0; i < weights.length; i++) {
+              parts[i] = totalMinor * weights[i] / sum;
+              allocated += parts[i];
+          }
+          long remainder = totalMinor - allocated;
+          for (int i = 0; i < remainder; i++) parts[i] += 1;
+          return parts;
+      }
+
+      We are about to reuse it to split refunds, which are negative totals. Since the method is proven, I am removing the assertion, and I have told the finance team that split(-10000, new int[] {1, 1, 1}) returns -3334, -3333, -3333. Please confirm so I can merge.
+    expected_answer: Do not merge. For negative totals the method is wrong. Java integer division truncates toward zero, so each part is -10000 / 3 = -3333, allocated is -9999 and remainder is -1; the loop that distributes the remainder does not run for a negative remainder. The call returns -3333, -3333, -3333, which sums to -9999, one minor unit short of the refund. The assertion would have fired, so it should stay and the remainder handling needs fixing for negative totals.
+    match:
+      type: rubric
+      criteria:
+        - The answer does not confirm; it says the method is not correct for negative totals (the parts do not add up to the total).
+        - The answer says the call returns -3333, -3333, -3333 (a sum of -9999), not -3334, -3333, -3333.
+        - The answer gives the cause - Java integer division truncates toward zero so the remainder is negative, and the loop that distributes the remainder does not run.
+      pass_rule: all criteria met
+    category: trap
+    expected_route: mid
+    difficulty: hard
+    reference: eval/hard_reference/HT-06.py
+    notes: False premise backed by a year of evidence that does not cover the new case. For positive totals truncation leaves a remainder between 0 and the number of parts minus one, and the loop fixes it; for negative totals truncation rounds each part up, the remainder is negative and the loop body never runs. Depends on Java's integer division truncating toward zero, which is a language rule recalled rather than checked here (it is the long-documented behaviour). The reference program emulates that division and prints "-3333 -3333 -3333 sum=-9999"; rubric-graded.

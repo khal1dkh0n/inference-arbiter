@@ -1,0 +1,394 @@
+# Open-book Q&A set, v1. Schema and scoring rules: eval/openbook/README.md
+# Corpus: eval/openbook/corpus.yaml (document ids below refer to it).
+# Every evidence quote was copied from the source file and is checked verbatim (after
+# whitespace normalisation) by tests/test_openbook_eval.py and by run_eval.py at start-up.
+# Every answerable case was asked of the mid tier with no sources (closed:mid) and kept
+# only when that answer was wrong; see the README for the cases dropped by that check
+# (OB-15 and OB-17 were dropped, so the ids have gaps).
+version: 1
+cases:
+  # ---- single-fact lookups, one passage ----
+  - id: OB-01
+    question: With the Jev Router plugin, which response metadata field and value tell me that the router ignored my include list?
+    sources: [jev_router]
+    answerable: true
+    expected_answer: 'The jev-router pipeline stage reports list_fallback: "models_ignored".'
+    match:
+      type: contains
+      all_of: [list_fallback, models_ignored]
+    evidence:
+      - document: jev_router
+        quote: '| `list_fallback` | `"models_ignored"` when the include list matched catalog models but no pool model. |'
+      - document: jev_router
+        quote: 'The [pipeline stage](#seeing-what-the-router-did) reports `list_fallback: "models_ignored"`.'
+    category: lookup
+    notes: Field name and value are specific to this page.
+
+  - id: OB-02
+    question: For a streaming request to the Anthropic Messages endpoint with router metadata enabled, in which event is openrouter_metadata delivered?
+    sources: [router_metadata]
+    answerable: true
+    expected_answer: As part of the terminal message_stop event.
+    match:
+      type: contains
+      all_of: [message_stop]
+    evidence:
+      - document: router_metadata
+        quote: 'or as part of the terminal `message_stop` event (Anthropic Messages)'
+    category: lookup
+    notes: The same sentence gives a different answer for Chat Completions and Responses (final chunk before [DONE]).
+
+  - id: OB-03
+    question: The TypeSafe SDK is configured with the base URL https://openrouter.ai/api. What full URL does it send its requests to?
+    sources: [typesafe_sdk]
+    answerable: true
+    expected_answer: https://openrouter.ai/api/v1/systemone
+    match:
+      type: contains
+      all_of: ["openrouter.ai/api/v1/systemone"]
+    evidence:
+      - document: typesafe_sdk
+        quote: 'The SDK appends `/v1/systemone` to the base URL, so requests are sent to `https://openrouter.ai/api/v1/systemone`.'
+    category: lookup
+    notes: Memory tends to offer /api/v1 or the Decisions path instead.
+
+  - id: OB-04
+    question: I am calling openrouter/auto-beta. Which plugin id do per-request router settings have to use, and what happens to settings I send under the plugin id auto-router instead?
+    sources: [auto_router]
+    answerable: true
+    expected_answer: The plugin id auto-beta-router. Settings sent under the other slug's plugin id are accepted but silently ignored.
+    match:
+      type: contains
+      all_of: [auto-beta-router, ignored]
+    evidence:
+      - document: auto_router
+        quote: 'per-request settings must use the plugin id `auto-beta-router` instead of `auto-router`'
+      - document: auto_router
+        quote: "Settings sent under the other slug's plugin id are accepted but silently ignored"
+    category: lookup
+    notes: Two adjacent passages; the second half (silently ignored, not rejected) is the part a guess gets wrong.
+
+  - id: OB-05
+    question: When the TypeSafe SDK is pointed at OpenRouter, what does the bare model ID jev-latest get routed as?
+    sources: [typesafe_sdk]
+    answerable: true
+    expected_answer: "~typesafe/jev-latest, OpenRouter's alias for the newest Jev release."
+    match:
+      type: contains
+      all_of: ["~typesafe/jev-latest"]
+    evidence:
+      - document: typesafe_sdk
+        quote: '`jev-latest` is routed as `~typesafe/jev-latest`'
+    category: lookup
+    notes: The tilde prefix is the detail; typesafe/jev-latest without it does not match.
+
+  - id: OB-06
+    question: According to the workspace plan, which two files in the local hermes-260917 checkout may be skimmed for reference patterns?
+    sources: [build_plan]
+    answerable: true
+    expected_answer: agent/auxiliary_client.py and hermes_cli/config.py
+    match:
+      type: contains
+      all_of: [auxiliary_client.py, "hermes_cli/config.py"]
+    evidence:
+      - document: build_plan
+        quote: '`agent/auxiliary_client.py` (isolating cheap side-task models from the main reasoning model)'
+      - document: build_plan
+        quote: '`hermes_cli/config.py` (separating `config.yaml` from `.env` secrets)'
+    category: lookup
+    notes: Private project document; not in any model's training data.
+
+  # ---- numeric and exact values ----
+  - id: OB-07
+    question: What is the maximum total number of characters allowed in one Jev Router model list (for example the models list)? Answer with the number only.
+    sources: [jev_router]
+    answerable: true
+    expected_answer: "65536"
+    match:
+      type: numeric
+      value: 65536
+      tolerance: 0
+    evidence:
+      - document: jev_router
+        quote: 'Each list takes up to 1,024 patterns, with at most 1,024 characters per pattern and 65,536 characters total per list.'
+    category: exact_value
+    notes: Three limits in one sentence; the distractor is 1,024.
+
+  - id: OB-08
+    question: In the Jev tutorial's captured live response, how many input tokens did the request use and what did the call cost in USD?
+    sources: [jev_tutorial]
+    answerable: true
+    expected_answer: 476 input tokens, costing 0.000019992 USD.
+    match:
+      type: contains
+      all_of: ["476", "0.000019992"]
+    evidence:
+      - document: jev_tutorial
+        quote: '"usage": { "input_tokens": 476, "output_tokens": 70, "cost": 0.000019992 }'
+    category: exact_value
+    notes: Values exist only in this captured response.
+
+  - id: OB-09
+    question: How many aspects of a request does the Auto Router's decision model rate in a single call?
+    sources: [auto_router]
+    answerable: true
+    expected_answer: Eleven.
+    match:
+      type: contains
+      any_of: [eleven, "11"]
+    evidence:
+      - document: auto_router
+        quote: 'A fast decision model rates eleven aspects of the request in one call'
+    category: exact_value
+    notes: A count stated once in the how-it-works list.
+
+  - id: OB-10
+    question: According to the model inventory, what is the footprint in GB of the model assigned to the Local Heavy / Reasoning tier? Answer with the number only.
+    sources: [thread_summary]
+    answerable: true
+    expected_answer: "65"
+    match:
+      type: numeric
+      value: 65
+      tolerance: 0
+    evidence:
+      - document: thread_summary
+        quote: '| **Local Heavy / Reasoning** | `gpt-oss-120b-ctx16k:latest` | 65 GB |'
+    category: exact_value
+    notes: Table lookup; neighbouring rows hold 19 GB and 9.3 GB.
+
+  - id: OB-11
+    question: Which Jev Router reasoning settings are not supported and return a 400?
+    sources: [jev_router]
+    answerable: true
+    expected_answer: 'reasoning.max_tokens and reasoning.mode: "pro".'
+    match:
+      type: contains
+      all_of: [max_tokens, pro]
+    evidence:
+      - document: jev_router
+        quote: '`reasoning.max_tokens` and `reasoning.mode: "pro"` are not supported and return `400`.'
+    category: exact_value
+    notes: reasoning.effort is accepted as a hint, so "effort" is the wrong answer.
+
+  - id: OB-12
+    question: In the Hermes setup described in the discussion summary, how many searches per month does the SerpApi free tier give? Answer with the number only.
+    sources: [thread_summary]
+    answerable: true
+    expected_answer: "250"
+    match:
+      type: numeric
+      value: 250
+      tolerance: 0
+    evidence:
+      - document: thread_summary
+        quote: 'SerpApi (Google Light, 250 searches/month free tier)'
+    category: exact_value
+    notes: Memory of the SerpApi free plan gives 100.
+
+  # ---- the document contradicts a plausible prior ----
+  - id: OB-13
+    question: I set models to ["anthropic/*"] on the Jev Router plugin. Is the request guaranteed to be served by an Anthropic model?
+    sources: [jev_router]
+    answerable: true
+    expected_answer: No. models and allowed_models are include preferences with fallback, not hard allowlists; if the include set leaves no routable candidates Jev retries without it and can route to another author. The page says not to use an include list to enforce an author restriction.
+    match:
+      type: rubric
+      criteria:
+        - Says the request is not guaranteed to be served by an Anthropic model.
+        - Explains that the include list is a preference that the router drops or retries without when it leaves no routable candidates, so another author's model can be selected.
+      pass_rule: all criteria met
+    evidence:
+      - document: jev_router
+        quote: '`models: ["anthropic/*"]` prefers Anthropic, but can fall back to another author when it leaves no routable candidates. Do not use an include list to enforce an author restriction.'
+    category: contradicts_prior
+    notes: The usual reading of an allow list is a hard restriction.
+
+  - id: OB-14
+    question: How are output tokens billed for Jev?
+    sources: [jev_tutorial]
+    answerable: true
+    expected_answer: They are not billed. Jev is billed on the number of input tokens and output tokens are free.
+    match:
+      type: rubric
+      criteria:
+        - Says that Jev output tokens are free (not billed), with billing based on input tokens.
+      pass_rule: all criteria met
+    evidence:
+      - document: jev_tutorial
+        quote: 'Jev is billed based on the number of input tokens, and output tokens are free.'
+    category: contradicts_prior
+    notes: Prior for any model API is that output tokens cost more than input tokens.
+
+  - id: OB-16
+    question: My Auto Router requests still send cost_quality_tradeoff and pin_model. Are those requests rejected now?
+    sources: [auto_router]
+    answerable: true
+    expected_answer: No. Requests that send them still succeed, but the current router does not use them; they can change routing only if a request falls back to the previous-generation router. cost_tier replaces cost_quality_tradeoff.
+    match:
+      type: rubric
+      criteria:
+        - Says the requests are not rejected (they still succeed).
+        - Says the current Auto Router does not use these settings (they are ignored unless a request falls back to the previous-generation router).
+      pass_rule: all criteria met
+    evidence:
+      - document: auto_router
+        quote: "Requests that send them still succeed, but the current router doesn't use them, and they can change routing only if a request falls back to the previous-generation router."
+    category: contradicts_prior
+    notes: A strict API (the Jev Router plugin returns 400 for unknown fields) suggests rejection.
+
+  - id: OB-18
+    question: My Jev Router include list contains only a misspelled model slug that matches nothing in the catalog. Does the router fall back to the whole pool, and what status do I get?
+    sources: [jev_router]
+    answerable: true
+    expected_answer: No. Includes that match no catalog model are never relaxed; the request fails with 404 naming the field.
+    match:
+      type: rubric
+      criteria:
+        - Says the router does not fall back to the whole pool in this case.
+        - Says the request fails with a 404.
+      pass_rule: all criteria met
+    evidence:
+      - document: jev_router
+        quote: 'the request fails with `404` naming the field instead of routing to the whole pool'
+    category: contradicts_prior
+    notes: The same page says includes are relaxed when they leave no routable candidates; this is the stated exception.
+
+  # ---- two passages or two documents ----
+  - id: OB-19
+    question: Is allowed_models a hard restriction on both the Auto Router and the Jev Router?
+    sources: [auto_router, jev_router]
+    answerable: true
+    expected_answer: No. On the Auto Router allowed_models is a hard restriction. On the Jev Router allowed_models is an alias of models, an include preference with fallback, not a hard allowlist; only excluded_models is hard there.
+    match:
+      type: rubric
+      criteria:
+        - Says allowed_models is a hard restriction on the Auto Router.
+        - Says that on the Jev Router allowed_models is an include preference with fallback, not a hard restriction.
+      pass_rule: all criteria met
+    evidence:
+      - document: auto_router
+        quote: 'The list is a hard restriction: the router routes only to models it matches'
+      - document: jev_router
+        quote: '`models` and `allowed_models` are include preferences with fallback, not hard allowlists.'
+    category: multi_source
+    notes: Same field name, opposite semantics, one statement in each document.
+
+  - id: OB-20
+    question: The Auto Router page says its routing rationale appears in a pipeline stage of the router metadata. What is that stage called, and which field of that stage reports the tier my model lists capped the request at?
+    sources: [auto_router, jev_router, router_metadata]
+    answerable: true
+    expected_answer: The jev-router stage in openrouter_metadata.pipeline; its list_tier_cap field reports the tier the lists capped the request at.
+    match:
+      type: contains
+      all_of: [jev-router, list_tier_cap]
+    evidence:
+      - document: auto_router
+        quote: 'The `jev-router` stage in `openrouter_metadata.pipeline` lists `resolved_models`'
+      - document: jev_router
+        quote: '| `list_tier_cap` | The tier the lists capped the request at, when they lowered it. |'
+    category: multi_source
+    notes: Stage name from one document, field from another; router_metadata is supplied as an on-topic distractor.
+
+  - id: OB-21
+    question: Jev can be called through the Decisions API or through the TypeSafe SDK pointed at OpenRouter. What URL path does each one post to?
+    sources: [jev_tutorial, typesafe_sdk]
+    answerable: true
+    expected_answer: The Decisions API posts to /api/alpha/decisions; the TypeSafe SDK posts to /api/v1/systemone.
+    match:
+      type: contains
+      all_of: ["/api/alpha/decisions", "/api/v1/systemone"]
+    evidence:
+      - document: jev_tutorial
+        quote: 'curl https://openrouter.ai/api/alpha/decisions'
+      - document: typesafe_sdk
+        quote: '`POST /api/v1/systemone` sends state and typed questions to a System One model and returns its answers.'
+    category: multi_source
+    notes: One path per document.
+
+  - id: OB-22
+    question: Which model is selected for the triage tier, and below what triage confidence does the router escalate to a stronger tier?
+    sources: [build_plan, thread_summary]
+    answerable: true
+    expected_answer: llama3.2:3b for triage (qwen3:14b as the alternative); the router escalates when confidence is below 0.80.
+    match:
+      type: contains
+      all_of: ["llama3.2:3b"]
+      any_of: ["0.80", "0.8"]
+    evidence:
+      - document: thread_summary
+        quote: '| **Triage / Router** | `llama3.2:3b` *(or `qwen3:14b`)* |'
+      - document: build_plan
+        quote: '`confidence < 0.80` -> stronger tier'
+    category: multi_source
+    notes: Model from the summary's inventory table, threshold from the build plan.
+
+  - id: OB-23
+    question: In the Jev tutorial's captured live response for the support ticket, what urgency score came back, and which of the listed criteria does that score sit on?
+    sources: [jev_tutorial]
+    answerable: true
+    expected_answer: 1.99, which sits almost exactly on "Blocking revenue right now" (index 2 of the scale).
+    match:
+      type: contains
+      all_of: ["1.99", "blocking revenue right now"]
+    evidence:
+      - document: jev_tutorial
+        quote: 'A score of `1.99` sits almost exactly on "Blocking revenue right now."'
+    category: multi_source
+    notes: Needs the response block and the reading guide (or the legend); two passages in one document.
+
+  # ---- unanswerable: on-topic sources that do not contain the answer ----
+  - id: OB-U1
+    question: Does the Jev Router add a fee on top of the selected model's price, and if so how much?
+    sources: [jev_router]
+    answerable: false
+    expected_answer: The supplied page does not say. It covers cost tiers as routing policies and gives no pricing or fee for the router itself.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: The Auto Router page (not supplied) states there is no additional fee for that router; carrying that over to the Jev Router is an unsupported answer.
+
+  - id: OB-U2
+    question: How long does OpenRouter keep a generation record available through GET /api/v1/generation?
+    sources: [router_metadata]
+    answerable: false
+    expected_answer: The supplied page does not say. It mentions fetching the generation record with the X-Generation-Id header but gives no retention period.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: The endpoint is named in the page, the retention period is not.
+
+  - id: OB-U3
+    question: What is the context length of typesafe/jev-1.13 in tokens?
+    sources: [jev_tutorial, typesafe_sdk]
+    answerable: false
+    expected_answer: The supplied pages do not say. Both point to the Jev model page for the context length.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: Both documents mention context length only as something listed on the model page.
+
+  - id: OB-U4
+    question: How long does an Auto Router session stay sticky before it expires?
+    sources: [auto_router]
+    answerable: false
+    expected_answer: The supplied page does not say. It refers to the Provider Sticky Routing page for how long sessions last.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: The page explains stickiness and defers the duration to another page.
+
+  - id: OB-U5
+    question: How much unified memory does the Mac Studio in this plan have?
+    sources: [build_plan, thread_summary]
+    answerable: false
+    expected_answer: Neither document says. They list model footprints and warn about unified-memory swap thrashing but never state the machine's memory.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: Model footprints (up to 65 GB) invite an inferred figure; any specific figure is unsupported.

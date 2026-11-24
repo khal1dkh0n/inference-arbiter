@@ -1,0 +1,244 @@
+# Large-corpus open-book set, v1 (16 cases: 13 answerable, 3 unanswerable). Schema and scoring rules: eval/openbook/README.md
+# Every case is asked of the WHOLE corpus in eval/openbook/corpus_large.yaml (`sources: all`):
+# every page of the OpenRouter documentation, about 14 MB of text, more than the mid tier's
+# context window holds. Evidence quotes were copied from the fetched pages on 2026-11-22.
+version: 1
+cases:
+
+  - id: OB-L02
+    question: After how many seconds does OpenRouter cut off the judge call of the Switchyard router?
+    sources: all
+    answerable: true
+    expected_answer: After 2.5 seconds, inside a 3-second budget for the whole routing step.
+    match:
+      type: contains
+      all_of: ["2.5"]
+    evidence:
+      - document: guides_routing_routers_switchyard_router
+        quote: 'The judge call is cut off after 2.5 seconds, inside the 3-second budget OpenRouter gives the whole routing step.'
+    category: exact_value
+    notes: The same sentence holds a second, different time (3 seconds).
+
+  - id: OB-L03
+    question: Which model is the Switchyard router's default judge, and which model judges instead when the caller's settings exclude the default?
+    sources: all
+    answerable: true
+    expected_answer: google/gemini-3.5-flash-lite by default; openai/gpt-4o-mini when the settings exclude it.
+    match:
+      type: contains
+      all_of: ["gemini-3.5-flash-lite", "gpt-4o-mini"]
+    evidence:
+      - document: guides_routing_routers_switchyard_router
+        quote: 'send part of your prompt to the judge model, `google/gemini-3.5-flash-lite`, or `openai/gpt-4o-mini` when your settings exclude the default judge'
+      - document: guides_routing_routers_switchyard_router
+        quote: 'The judge is a small, fast model (`google/gemini-3.5-flash-lite`) that estimates whether the efficient tier can solve your task.'
+      - document: guides_routing_routers_switchyard_router
+        quote: 'OpenRouter uses `openai/gpt-4o-mini` as the judge.'
+    category: lookup
+    notes: Two model names from one page.
+
+  - id: OB-L04
+    question: At what temperature does the analyst call of the Fusion router run?
+    sources: all
+    answerable: true
+    expected_answer: The analyst always runs at temperature 0, whatever temperature is forwarded to the panel calls.
+    match:
+      type: rubric
+      criteria:
+        - States that the Fusion analyst runs at temperature 0.
+      pass_rule: all criteria met
+    evidence:
+      - document: guides_routing_routers_fusion_router
+        quote: 'The analyst always runs at temperature 0.'
+      - document: guides_features_server_tools_fusion
+        quote: 'The analyst always runs at temperature 0.'
+    category: lookup
+    notes: A table cell; the same row gives the panel range 0 to 2 as a distractor.
+
+  - id: OB-L06
+    question: For the Pareto Code Router, which range of min_coding_score values selects the medium tier?
+    sources: all
+    answerable: true
+    expected_answer: Any value from 0.33 up to 0.66 selects the medium tier.
+    match:
+      type: contains
+      all_of: ["0.33", "0.66"]
+    evidence:
+      - document: guides_routing_routers_pareto_router
+        quote: 'which selects the medium tier, as any value from `0.33` up to `0.66` does'
+      - document: guides_routing_routers_pareto_router
+        quote: '| `>= 0.33`, `< 0.66` | medium | the two highest-scoring groups |'
+    category: exact_value
+    notes: The page's own examples pass 0.4, which is not the range.
+
+  - id: OB-L08
+    question: In the Agent SDK's callModel, what thresholds does setting doomLoop to true apply for observe, block and stop?
+    sources: all
+    answerable: true
+    expected_answer: observe at 2, block at 3, stop at 6.
+    match:
+      type: rubric
+      criteria:
+        - States observe at a streak of 2.
+        - States block at a streak of 3.
+        - States stop at a streak of 6.
+      pass_rule: all criteria met
+    evidence:
+      - document: agent_sdk_call_model_doom_loop_detection
+        quote: 'recommended defaults: observe@2, block@3, stop@6'
+    category: exact_value
+    notes: The fact sits in a code comment.
+
+  - id: OB-L11
+    question: What is the maximum length of the session_id used for provider sticky routing?
+    sources: all
+    answerable: true
+    expected_answer: At most 256 characters.
+    match:
+      type: numeric
+      value: 256
+      tolerance: 0
+    evidence:
+      - document: guides_best_practices_prompt_caching
+        quote: 'The `session_id` must be at most 256 characters.'
+    category: exact_value
+    notes: One number on one page.
+
+  - id: OB-L13
+    question: From what date does Google require Safety Retention for Google models served through Vertex, and for how long may flagged prompts be retained?
+    sources: all
+    answerable: true
+    expected_answer: Starting October 18, 2026; flagged prompts may be retained for up to 90 days.
+    match:
+      type: rubric
+      criteria:
+        - Gives the date as 18 October 2026.
+        - States that flagged prompts may be retained for up to 90 days.
+      pass_rule: all criteria met
+    evidence:
+      - document: guides_features_zdr
+        quote: 'Starting October 18, 2026, Google requires Safety Retention for Google models served through Vertex.'
+    category: lookup
+    notes: A dated policy statement.
+
+  - id: OB-L14
+    question: In the alignment plugin, how many rules may the rules array hold, and how long may the text of one rule be?
+    sources: all
+    answerable: true
+    expected_answer: 1 to 128 rules, each with 1 to 200 characters of text.
+    match:
+      type: contains
+      all_of: ["128", "200"]
+    evidence:
+      - document: guides_features_plugins_alignment
+        quote: '1 to 128 rules. Each rule is an object with `rule`, 1 to 200 characters of text'
+    category: exact_value
+    notes: A table cell with two limits.
+
+  - id: OB-L15
+    question: In the alignment plugin, within how many seconds must the evaluator answer before the time_limit outcome is reported?
+    sources: all
+    answerable: true
+    expected_answer: Within 4 seconds.
+    match:
+      type: numeric
+      value: 4
+      tolerance: 0
+    evidence:
+      - document: guides_features_plugins_alignment
+        quote: 'The evaluator did not answer within 4 seconds.'
+    category: exact_value
+    notes: A table cell deep in a long page.
+
+  - id: OB-L16
+    question: In the armor plugin, what is the maximum length of a custom rule's instructions field?
+    sources: all
+    answerable: true
+    expected_answer: Up to 8,000 characters.
+    match:
+      type: contains
+      any_of: ["8,000", "8000"]
+    evidence:
+      - document: guides_features_plugins_armor
+        quote: 'Up to 8,000 characters. What the rule matches, written for the decision model.'
+    category: exact_value
+    notes: Neighbouring rows give 64 and 120 characters for other fields.
+
+  - id: OB-L17
+    question: In the web search plugin, which Exa mode has the highest request cost, and what does it cost per 1,000 requests?
+    sources: all
+    answerable: true
+    expected_answer: deep-reasoning, at 15 USD per 1,000 requests (0.015 USD per request).
+    match:
+      type: contains
+      all_of: ["deep-reasoning", "15"]
+    evidence:
+      - document: guides_features_plugins_web_search
+        quote: '| `deep-reasoning` | \~12–40 seconds | \$15 per 1,000 requests |'
+      - document: guides_features_server_tools_web_search
+        quote: '| `deep-reasoning` | \~12–40 seconds | \$0.015 |'
+    category: lookup
+    notes: Needs a comparison across the rows of one table; a second table on the page lists another engine's modes.
+
+  - id: OB-L18
+    question: In the armor plugin, what are the default thresholds for deny rules and for allow rules?
+    sources: all
+    answerable: true
+    expected_answer: 0.6 for deny rules and 0.7 for allow rules.
+    match:
+      type: contains
+      all_of: ["0.6", "0.7"]
+    evidence:
+      - document: guides_features_plugins_armor
+        quote: 'Defaults to `0.6` for deny rules and `0.7` for allow rules.'
+    category: exact_value
+    notes: Two defaults in one table cell.
+
+  - id: OB-L19
+    question: In the web search plugin, which languages does the Parallel engine's turbo mode support?
+    sources: all
+    answerable: true
+    expected_answer: English and Japanese.
+    match:
+      type: contains
+      all_of: ["English", "Japanese"]
+    evidence:
+      - document: guides_features_plugins_web_search
+        quote: '| `turbo` | \~200 ms | \$1 per 1,000 requests | English and Japanese |'
+      - document: guides_features_server_tools_web_search
+        quote: '| `turbo` | \~200 ms | \$1 per 1,000 requests | English and Japanese |'
+    category: lookup
+    notes: One cell of a table; the neighbouring rows say other things about language support.
+
+  - id: OB-LU1
+    question: What time budget, in seconds, does OpenRouter give the routing step of the Pareto Code Router?
+    sources: all
+    answerable: false
+    expected_answer: The documentation does not say. It gives a 3-second routing budget for the Switchyard router only; the Pareto Code Router page states no time budget.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: Another router's page documents exactly this value (3 seconds), so a careless answer borrows it. Checked by searching the corpus for time budgets on the Pareto pages.
+
+  - id: OB-LU2
+    question: When the cloudflare-ai engine processes a PDF, how many images per PDF does OpenRouter forward to the model at most?
+    sources: all
+    answerable: false
+    expected_answer: The documentation does not say. The cap of 8 images per PDF is stated for the mistral-ocr engine only.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: The 8-image cap is documented for mistral-ocr; no image cap is stated for cloudflare-ai. Checked by searching every page that mentions cloudflare-ai.
+
+  - id: OB-LU3
+    question: After how many seconds does the Fusion router cut off a panel model that is slow to respond?
+    sources: all
+    answerable: false
+    expected_answer: The documentation does not say. The Fusion pages state no timeout for panel calls; the 2.5-second cut-off belongs to the Switchyard judge.
+    match:
+      type: abstain
+    evidence: []
+    category: unanswerable
+    notes: The Fusion router and server-tool pages mention no timeout. Checked by searching both pages for timeouts and durations.

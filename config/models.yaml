@@ -1,0 +1,334 @@
+# Router and chain configuration. Swapping a model is an edit here, never a code change.
+# Secrets are referenced by environment variable NAME only (see .env.example).
+
+providers:
+  ollama:
+    kind: ollama_native            # native /api/chat (the /v1 endpoint omits load_duration)
+    base_url: http://localhost:11434
+  openrouter:
+    kind: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+  # OpenRouter's Decisions API (alpha): typed questions answered with probabilities.
+  # Serves triage and verifier tiers only; it cannot write an answer.
+  openrouter_decisions:
+    kind: openrouter_decisions
+    base_url: https://openrouter.ai/api
+    api_key_env: OPENROUTER_API_KEY
+
+# Tier fields:
+#   model, provider, timeout_s   required
+#   role                         answer (default) | triage | verifier | embedding. Verifier tiers
+#                                check a draft (chain) or its grounding (openbook) and are never
+#                                routed to for an answer. An embedding tier ranks passages.
+#   cloud                        true when the request leaves this machine
+#   effort                       low | medium | high (logged; sent to OpenRouter as reasoning.effort)
+#   think                        Ollama only: true | false | effort (send the effort string, for
+#                                models with graded thinking such as gpt-oss). Omit for models
+#                                without thinking support.
+#   num_ctx                      Ollama only: required when the tag has no -ctx suffix
+#   context_window_tokens        the model's context window when known; stuffed mode refuses a
+#                                prompt estimated above it
+#   keep_alive                   Ollama only: how long the model stays resident
+#   temperature, max_output_tokens   optional
+#   on_error                     tier to hop to ONCE when the answer call fails
+#   input_price_per_mtok / output_price_per_mtok   USD per million tokens, for estimated cost
+tiers:
+  triage:
+    model: llama3.2:3b
+    provider: ollama
+    cloud: false
+    timeout_s: 15
+    think: false
+    num_ctx: 4096
+    keep_alive: 30m
+    temperature: 0
+    max_output_tokens: 200
+
+  # Triage candidate: TypeSafe Jev through OpenRouter. The question text leaves this
+  # machine. Its questions and truth table are in src/inference_arbiter/jev_triage.py.
+  # Select it with `triage_tier: triage_jev` below or `--triage-tier triage_jev`.
+  triage_jev:
+    model: typesafe/jev-1.14
+    provider: openrouter_decisions
+    role: triage
+    cloud: true
+    timeout_s: 5
+
+  # Chain-mode verifier (chat model). Deliberately a different model from the local
+  # drafter, so the second opinion does not share the drafter's blind spots. The question
+  # and the draft leave this machine. Note: when triage routes a question to `mid`, the
+  # drafter and this verifier are the same model.
+  verify:
+    model: kimi-k3.1-pro:cloud
+    provider: ollama
+    role: verifier
+    cloud: true
+    timeout_s: 120
+    temperature: 0
+
+  # Chain-mode verifier candidate: TypeSafe Jev answers three typed judgments and the
+  # verdict is decided in code. Questions and truth table: src/inference_arbiter/verifier.py.
+  # Select it with `chain.verifier_tier: verify_jev` or `--verifier-tier verify_jev`.
+  verify_jev:
+    model: typesafe/jev-1.14
+    provider: openrouter_decisions
+    role: verifier
+    cloud: true
+    timeout_s: 10
+
+  # Openbook grounding verifier (default): TypeSafe Jev gets one typed yes/no judgment per
+  # claim ("does the cited passage state or directly entail it") plus one on whether the
+  # passages answer the question, in one request. The status is decided in code.
+  # Questions, thresholds and truth table: src/inference_arbiter/grounding.py. The question, the
+  # retrieved passages and the claims leave this machine.
+  ground_jev:
+    model: typesafe/jev-1.14
+    provider: openrouter_decisions
+    role: verifier
+    cloud: true
+    timeout_s: 15
+
+  # Openbook grounding verifier (chat model), local. Returns the same per-claim judgments
+  # under schema validation. Deliberately a different model from the `mid` drafter.
+  # Select it with `openbook.grounding_verifier_tier: ground_chat` or
+  # `--verifier-tier ground_chat`.
+  ground_chat:
+    model: qwen3-14b-ctx40k:latest
+    provider: ollama
+    role: verifier
+    cloud: false
+    timeout_s: 120
+    think: false
+    keep_alive: 10m
+    temperature: 0
+
+  # Local embedding model that ranks passages in openbook mode (Ollama /api/embed).
+  embed:
+    model: nomic-embed-text:latest
+    provider: ollama
+    role: embedding
+    cloud: false
+    timeout_s: 60
+    num_ctx: 2048
+    keep_alive: 10m
+
+  local:
+    model: qwen3-14b-ctx40k:latest
+    provider: ollama
+    cloud: false
+    timeout_s: 120
+    think: false
+    keep_alive: 10m
+    on_error: mid
+
+  # Measured on the golden set (2026-11-21, 5 code questions, one run each):
+  # qwen2.5-coder:32b 2/5 at ~12.7 s median, qwen3-14b 4/5, mid 5/5. The specialist lost,
+  # so code questions use the local workhorse until a larger sample says otherwise.
+  # To retest the specialist: model qwen2.5-coder:32b with num_ctx 32768, and drop think.
+  code:
+    model: qwen3-14b-ctx40k:latest
+    provider: ollama
+    cloud: false
+    timeout_s: 120
+    think: false
+    keep_alive: 10m
+    on_error: mid
+
+  # Never auto-routed. Reach it with --tier local_heavy only.
+  local_heavy:
+    model: gpt-oss-120b-ctx16k:latest
+    provider: ollama
+    cloud: false
+    timeout_s: 300
+    effort: medium
+    think: effort
+    keep_alive: 5m
+    on_error: mid
+
+  # Ollama cloud models are billed by subscription, not per token, so no prices are set
+  # and cost logs as 0 with cost_source local_zero. Set prices to log an estimated cost.
+  # deepseek-v4-flash:cloud was the planned default but Ollama cloud answers HTTP 410 for it
+  # (retired upstream 2026-09-25, observed 2026-11-21), so mid uses the other installed
+  # cloud tag.
+  mid:
+    model: kimi-k3.1-pro:cloud
+    provider: ollama
+    cloud: true
+    timeout_s: 120
+    # Reported by Ollama (/api/show, kimi-k3.context_length) on 2026-11-22.
+    context_window_tokens: 1048576
+    on_error: local
+
+  frontier:
+    # The model id comes from the environment (see .env.example), so the paid model can be
+    # swapped without editing this file. Unset: a frontier call fails with `missing_model`.
+    model: ${FRONTIER_MODEL}
+    provider: openrouter
+    cloud: true
+    timeout_s: 180
+    effort: medium
+    # Without a cap OpenRouter reserves the model's full 65536-token output, and a key with a
+    # small credit limit is refused with HTTP 402. The cap covers reasoning tokens too.
+    # 2048 keeps the reservation near 0.08 USD so a key with little headroom is not
+    # refused; answers measured so far used a few hundred output tokens.
+    max_output_tokens: 2048
+    on_error: mid
+    input_price_per_mtok: 8.00
+    output_price_per_mtok: 40.00
+
+confidence_threshold: 0.80
+fallback_tier: mid
+escalation:
+  local: mid
+  code: mid
+  mid: frontier
+allow_cloud_fallback: true
+store_prompt_text: true
+triage_max_chars: 4000
+# Which triage tier classifies each question: triage (local llama3.2:3b) or triage_jev.
+triage_tier: triage
+
+# Chain mode (`ask --chain`): draft on the routed tier, schema gate, verify, one repair.
+#   verifier_tier       a tier with role: verifier (verify | verify_jev)
+#   repair_tier         answer tier that repairs a draft the verifier did not support
+#   on_verifier_error   return_unverified (return the draft, status unavailable) | repair
+#   max_repairs         0 or 1
+#   repair_style        escalate (send only the original question to repair_tier) | repair
+#                       (send the rejected draft and the critique too; cost ~2.5x when measured)
+#   alt_verifier_tier   verifier used when the drafting tier runs the same model as
+#                       verifier_tier, so a model never verifies its own draft
+chain:
+  verifier_tier: verify
+  repair_tier: frontier
+  on_verifier_error: return_unverified
+  max_repairs: 1
+  repair_style: escalate
+  alt_verifier_tier: verify_jev
+
+# Auto mode, the default of `ask`: the harness picks the strategy the Phase 2 evals measured
+# best (eval/results/2026-11-22-phase2-final.md). The whole rule is auto.decide_mode.
+#   no sources                          one call to closed_book_tier, no triage, no chain
+#   --sources that fit                  stuffed: one call with the full text of every source
+#   --sources that do not fit           the openbook pipeline below
+#   --sources with --require-citations  the openbook pipeline, whatever the size
+# Explicit flags win over auto: --route (triage picks the tier), --chain, --stuffed, --tier.
+#   closed_book_tier     answer tier for a question without sources and for the stuffed call;
+#                        unset: fallback_tier. --tier overrides it
+#   stuffed_fill_ratio   sources fit when the estimated stuffed prompt (chars / 4) is at or under
+#                        this share of the answering tier's context_window_tokens. A tier without
+#                        context_window_tokens is treated as not fitting
+auto:
+  closed_book_tier: mid
+  stuffed_fill_ratio: 0.8
+
+# Openbook mode (auto with sources that do not fit, or `--require-citations`): load the sources, pick passages, draft with citations,
+# check every quote in code, judge grounding, escalate at most once. Stuffed mode
+# (`--stuffed`) reads only the source-loading limits from this block.
+#   drafter_tier                 answer tier that drafts from the passages (no triage call)
+#   escalation_tier              answer tier that gets the question and a capped set of passages
+#                                when the draft is not fully grounded, or (with all passages) when
+#                                the draft fails the schema. A refusal by this tier is final
+#   escalation_token_budget      the escalation is sent the passages the first draft cited plus the
+#                                best-ranked ones, up to this many estimated tokens (chars / 4).
+#                                null or 0: every passage the drafter saw (about 0.19 USD per
+#                                attempt on the large corpus). A passage that ranked low and was not
+#                                cited is then invisible to the escalation too
+#   grounding_verifier_tier      a tier with role: verifier (ground_jev | ground_chat)
+#   alt_grounding_verifier_tier  verifier used when the drafting tier runs the same model as
+#                                grounding_verifier_tier, so a model never judges its own draft
+#   on_verifier_error            return_unverified (return the draft, status unavailable) | escalate
+#   retrieval_ranking            hybrid (fuse embedding and BM25 rankings) | embedding | lexical
+#   embedding_tier               a tier with role: embedding; remove to rank lexically only
+#   embed_query_prefix / embed_document_prefix   task prefixes the embedding model expects
+#   top_k                        passages handed to the drafter when retrieval_token_budget is unset
+#   retrieval_token_budget       when set, the best-ranked passages are taken until this many
+#                                estimated tokens are filled, and top_k is ignored
+#   full_context_token_budget    a corpus at or under this estimate (chars / 4) skips retrieval
+#   max_passage_chars            passage size when chunking
+#   fetch_timeout_s, max_source_bytes   limits for loading a source
+#   cache_dir                    fetched pages and embedding vectors are cached here
+#   page_cache_max_age_s         a cached page older than this is fetched again
+openbook:
+  drafter_tier: mid
+  escalation_tier: frontier
+  grounding_verifier_tier: ground_jev
+  alt_grounding_verifier_tier: ground_chat
+  on_verifier_error: return_unverified
+  retrieval_ranking: hybrid
+  embedding_tier: embed
+  embed_query_prefix: "search_query: "
+  embed_document_prefix: "search_document: "
+  top_k: 6
+  retrieval_token_budget: 12000
+  escalation_token_budget: 3000
+  full_context_token_budget: 12000
+  max_passage_chars: 1200
+  fetch_timeout_s: 20
+  max_source_bytes: 2000000
+  cache_dir: data/cache
+  page_cache_max_age_s: 86400
+
+# Execute mode (`ask --execute`): the tier writes a short Python program (standard library
+# only) and, optionally, the answer it claims; the program runs in a throwaway `sbx`
+# MicroVM; code compares the program's last output line with the claim when there is one
+# (execute.decide; a matching claim gives `claim_matched`, no claim gives `executed`).
+# With the cross-check a second program is written independently and only matching
+# outputs are `verified`. Auto mode never picks execute mode. The gate is src/inference_arbiter/sandbox.py: no host mount, deny-all network scoped to
+# the one sandbox, an environment built from scratch, and the sandbox is always removed.
+#   tier               answer tier that writes the program; --tier overrides it
+#   think              Ollama only: `think` sent with the draft and repair calls (false | true |
+#                      low | medium | high); omit to use the tier's own setting. At the tier
+#                      default the mid model drafts the program in its reasoning and then
+#                      writes it again. Measured 2026-11-23 on the 26 hard cases, one run each:
+#                      default 26/26 at p50 20.8 s; medium 26/26 at p50 13.0 s and, run
+#                      again, 25/26 at p50 17.2 s; low 24/26 at p50 9.0 s (one wrong
+#                      program, one explanation too thin)
+#   max_repairs        0 or 1: attempts to fix a program that failed or timed out, with its
+#                      stderr fed back to the same tier. In a cross-check each program has
+#                      its own, fed only its own failure
+#   cross_check        false (default) | true: program B is written from the question alone
+#                      (nothing of program A is in any of B's prompts) and run in its own
+#                      sandbox; code compares the two outputs (execute.values_match: exact for
+#                      integers, hex and strings, 1e-9 relative for decimals, or half a unit
+#                      of the last place when one side is rounded shorter). Both match:
+#                      `verified`. They differ: `disputed`, both shown, no answer line. One
+#                      ran: `one_sided`, returned as not cross-checked. --cross-check
+#                      Both programs' prompts carry one fixed rule for the last line
+#                      (execute.BARE_ANSWER_LINE_RULE): the bare value only, exactly Yes or
+#                      No for a confirm question, exactly None when the value asked for does
+#                      not exist; all reasons go in the lines above. The comparison itself
+#                      is unchanged: `No` still does not match `No, unless ...`
+#   cross_check_tier   answer tier that writes program B; --cross-check-tier. Unset: the tier
+#                      of program A, and B is then asked for a different method. A free tier
+#                      with a different model is preferred: two models share fewer mistakes
+#                      Measured 2026-11-23 on the 26 hard cases with A on mid, one run each:
+#                      B on code (qwen3 14b) 6 verified, 18 disputed, 2 one_sided; B on
+#                      qwen2.5-coder:32b 9, 12, 5; B on mid 22, 3, 1. No verified answer was
+#                      wrong in any run. In the local-B disputes it was B that was wrong
+#                      With the answer-line rule in both prompts, B on mid: 24, 1, 1
+#   cross_check_think  Ollama only: `think` for program B's calls. Unset: `think` above when
+#                      B runs on program A's tier, else the B tier's own setting
+#   cross_check_parallel   true (default): the two programs are drafted and run at once
+#   timeout_s          wall-clock limit for one program
+#   max_output_bytes   cap on each of stdout and stderr; over it the run fails
+#   max_program_bytes  a longer program is refused before a sandbox is created
+#   cpus, memory       size of the MicroVM (sbx minimum memory is 512m)
+#   create_timeout_s   limit for `sbx create`, which pulls an image the first time
+#   sbx_path           the Docker Sandboxes CLI
+#   network_canary     a host the global sbx policy allows; sbx must report it denied for the
+#                      new sandbox before a program runs
+execute:
+  tier: mid
+  think: medium
+  max_repairs: 1
+  cross_check: false
+  cross_check_tier: mid
+  timeout_s: 20
+  max_output_bytes: 20000
+  max_program_bytes: 20000
+  cpus: 2
+  memory: 1g
+  create_timeout_s: 180
+  sbx_path: sbx
+  network_canary: pypi.org:443

@@ -1,0 +1,523 @@
+# Golden Q&A set, v2 (36 cases). Schema and scoring rules: eval/README.md
+# All numeric and code answers were computed by running the code (python3, sqlite3, node), not recalled.
+version: 2
+cases:
+  # ---- lookup (6) ----
+  - id: LK-01
+    question: What is the capital city of Australia?
+    expected_answer: Canberra
+    match:
+      type: contains
+      any_of: [Canberra]
+    category: lookup
+    expected_route: local
+    difficulty: easy
+    notes: Classic where a weak model says Sydney. Baseline sanity check for the local tier.
+
+  - id: LK-02
+    question: What is the chemical symbol for tungsten? Answer with the symbol only.
+    expected_answer: W
+    match:
+      type: exact
+    category: lookup
+    expected_route: local
+    difficulty: easy
+    notes: Symbol does not match the English name. Exact match on a one-token answer, tests answer-format discipline (answer should be just the symbol).
+
+  - id: LK-03
+    question: What is the SI unit of electrical resistance? Answer with the unit name only.
+    expected_answer: ohm
+    match:
+      type: exact
+    category: lookup
+    expected_route: local
+    difficulty: easy
+    notes: Single-word answer after case-insensitive, punctuation-stripped normalization.
+
+  - id: LK-04
+    question: What does HTTP status code 404 mean?
+    expected_answer: Not Found - the server cannot find the requested resource.
+    match:
+      type: contains
+      any_of: ["not found", "could not be found", "cannot be found", "can't be found", "couldn't be found", "cannot find", "could not find"]
+    category: lookup
+    expected_route: local
+    difficulty: easy
+    notes: Stable protocol definition (RFC 9110). Cheap local win.
+
+  - id: LK-05
+    question: What does the acronym DNS stand for, and what is its main job?
+    expected_answer: Domain Name System; it translates domain names into IP addresses.
+    match:
+      type: contains
+      all_of: ["domain name system"]
+      any_of: ["ip address", "ip addresses"]
+    category: lookup
+    expected_route: local
+    difficulty: easy
+    notes: Two-part definition, checks the local model completes both parts.
+
+  - id: LK-06
+    question: Who wrote the novel "Pride and Prejudice"?
+    expected_answer: Jane Austen
+    match:
+      type: contains
+      any_of: ["Jane Austen", "Austen"]
+    category: lookup
+    expected_route: local
+    difficulty: easy
+    notes: Stable literary fact, low-cost control that should never escalate.
+
+  # ---- code (5) ----
+  - id: CD-01
+    question: |
+      What exactly does this Python 3 program print?
+
+      def f(x, acc=[]):
+          acc.append(x)
+          return acc
+
+      print(f(1), f(2), f(3, []), f(4))
+    expected_answer: "[1, 2, 4] [1, 2, 4] [3] [1, 2, 4]"
+    match:
+      type: exact
+    category: code
+    expected_route: code
+    difficulty: medium
+    notes: Mutable default argument. All calls without an explicit list share one list, and print runs after all four calls, so the first two show the final contents. Verified by running it. Whitespace is normalized before comparing.
+
+  - id: CD-02
+    question: |
+      What does this Python 3 expression evaluate to? Give the resulting string only.
+
+      s = "abcdefgh"
+      s[1:7:2] + s[::-3]
+    expected_answer: bdfheb
+    match:
+      type: exact
+    category: code
+    expected_route: code
+    difficulty: medium
+    notes: Extended slicing with a negative step. s[1:7:2] is bdf and s[::-3] is heb. Verified by running it.
+
+  - id: CD-03
+    question: |
+      SQL (standard semantics, SQLite or PostgreSQL). Given:
+
+      CREATE TABLE a(id INTEGER);
+      INSERT INTO a VALUES (1),(2),(3),(4);
+      CREATE TABLE b(a_id INTEGER);
+      INSERT INTO b VALUES (1),(NULL);
+
+      What number does this query return?
+
+      SELECT COUNT(*) FROM a WHERE id NOT IN (SELECT a_id FROM b);
+    expected_answer: "0"
+    match:
+      type: numeric
+      value: 0
+      tolerance: 0
+    category: code
+    expected_route: code
+    difficulty: hard
+    notes: NOT IN against a subquery containing NULL yields UNKNOWN for every row, so the count is 0, not 3. Verified in sqlite3 (also returns 3 once the NULL is filtered out).
+
+  - id: CD-04
+    question: |
+      SQL (SQLite). Given:
+
+      CREATE TABLE cust(id INTEGER, region TEXT);
+      INSERT INTO cust VALUES (1,'N'),(2,'N'),(3,'S'),(4,'S');
+      CREATE TABLE ord(id INTEGER, cust_id INTEGER, status TEXT);
+      INSERT INTO ord VALUES (1,1,'paid'),(2,1,'void'),(3,2,'void'),(4,3,'paid');
+
+      What number does this query return?
+
+      SELECT COUNT(*) FROM cust c LEFT JOIN ord o ON o.cust_id = c.id WHERE o.status = 'paid';
+    expected_answer: "2"
+    match:
+      type: numeric
+      value: 2
+      tolerance: 0
+    category: code
+    expected_route: code
+    difficulty: medium
+    notes: The WHERE on the right-hand table turns the LEFT JOIN into an inner join, leaving the two paid rows. Verified in sqlite3 (moving the condition into ON gives 4, dropping it gives 5).
+
+  - id: CD-05
+    question: |
+      What does this Node.js (JavaScript) program print?
+
+      console.log([10, 9, 1, 100].sort().join(","));
+    expected_answer: 1,10,100,9
+    match:
+      type: exact
+    category: code
+    expected_route: code
+    difficulty: medium
+    notes: Array.prototype.sort with no comparator sorts by string value, so numbers sort lexicographically. Verified by running it in node.
+
+  # ---- reasoning (5) ----
+  - id: RS-01
+    question: What is 4637 multiplied by 8219? Give the integer only.
+    expected_answer: "38111503"
+    match:
+      type: numeric
+      value: 38111503
+      tolerance: 0
+    category: reasoning
+    expected_route: mid
+    difficulty: medium
+    notes: Multi-digit multiplication that small models often get subtly wrong. Exact integer required. Candidate for a Phase 3 Python-runner check.
+
+  - id: RS-02
+    question: >-
+      A deposit of 2500 dollars earns 4 percent annual interest, compounded quarterly
+      (1 percent per quarter). What is the balance after exactly 3 years? Round to the
+      nearest cent and give the number only.
+    expected_answer: "2817.06"
+    match:
+      type: numeric
+      value: 2817.06
+      tolerance: 0.01
+    category: reasoning
+    expected_route: mid
+    difficulty: medium
+    notes: 2500 * 1.01^12 = 2817.0626. Tests correct period count (12) and rate per period. Common error is using 4 percent annually (2812.16).
+
+  - id: RS-03
+    question: >-
+      Train A leaves a station at 9:00 and travels at 60 km/h. Train B leaves the same
+      station on the same track in the same direction at 10:30 and travels at 90 km/h.
+      How many kilometres from the station is Train B when it catches Train A? Give the
+      number only.
+    expected_answer: "270"
+    match:
+      type: numeric
+      value: 270
+      tolerance: 0
+    category: reasoning
+    expected_route: mid
+    difficulty: medium
+    notes: Head start 90 km, closing speed 30 km/h, 3 hours, so 90 km/h * 3 h = 270 km (catch-up at 13:30). Confusing the time gap with the distance gap is the usual error.
+
+  - id: RS-04
+    question: >-
+      How many integers from 1 to 1000 inclusive are divisible by 3 or by 5 but not by
+      15? Give the number only.
+    expected_answer: "401"
+    match:
+      type: numeric
+      value: 401
+      tolerance: 0
+    category: reasoning
+    expected_route: mid
+    difficulty: hard
+    notes: Inclusion-exclusion with an exclusion. 333 + 200 - 66 = 467 for "3 or 5", minus the 66 multiples of 15 gives 401. Verified with a brute-force loop.
+
+  - id: RS-05
+    question: >-
+      How many 4-digit positive integers (1000 to 9999) have digits that sum to exactly
+      10? Give the number only.
+    expected_answer: "219"
+    match:
+      type: numeric
+      value: 219
+      tolerance: 0
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    notes: Subtract 1 from the first digit and count non-negative solutions of a sum of 9 over four digits, C(12,3) = 220, then remove the one solution where the first digit would be 10, giving 219. Verified by brute-force enumeration. Included as the frontier-tier reasoning probe; the expected route is a hypothesis to be tested in Phase 2.
+
+  # ---- domain (6) ----
+  - id: DM-01
+    question: >-
+      In an EMV chip card transaction, what does ARQC stand for, and which party
+      generates it?
+    expected_answer: Authorization Request Cryptogram, generated by the chip card (ICC).
+    match:
+      type: rubric
+      criteria:
+        - Expands ARQC as Authorization Request Cryptogram.
+        - States that the chip card (ICC / card application) generates it, not the terminal, acquirer or issuer.
+      pass_rule: all criteria met
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: Core EMV concept. Wrong answers often credit the terminal or issuer with generating it. The issuer validates it, which a good answer may also mention.
+
+  - id: DM-02
+    question: >-
+      In ISO 8583:1987, what is the message type indicator (MTI) of the normal response
+      to a financial transaction request with MTI 0200? Give the four digits.
+    expected_answer: "0210"
+    match:
+      type: contains
+      all_of: ["0210"]
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: Version digit 0, class 2 (financial), function 1 (request response), origin 0. Version pinned to 1987 because the 1993 and 2003 editions use different leading digits.
+
+  - id: DM-03
+    question: >-
+      In the ISO 20022 message families, which pain message is used by a customer to
+      initiate a credit transfer with its bank? Give the message identifier.
+    expected_answer: pain.001 (CustomerCreditTransferInitiation)
+    match:
+      type: contains
+      any_of: ["pain.001"]
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: pain.001 is customer-to-bank initiation, as opposed to pacs.008 which is bank-to-bank. Version suffix (for example .001.09) is not required.
+
+  - id: DM-04
+    question: >-
+      In a four-party card payment scheme, which party ultimately pays interchange to
+      which party on a typical purchase?
+    expected_answer: The acquirer pays interchange to the issuer.
+    match:
+      type: rubric
+      criteria:
+        - States that interchange flows from the acquirer to the issuer (directly or via the scheme or network).
+        - Does not state that the merchant pays the issuer directly or that the issuer pays the acquirer.
+      pass_rule: all criteria met
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: Card payment flow fundamentals. The merchant pays the acquirer a merchant discount rate that funds interchange, which a good answer may mention but is not required.
+
+  - id: DM-05
+    question: >-
+      In the Model Context Protocol (MCP), what are the three core primitives that a
+      server can expose to a client?
+    expected_answer: Tools, resources, and prompts.
+    match:
+      type: contains
+      all_of: ["tools", "resources", "prompts"]
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: Server-side primitives are stable across protocol revisions. Client-side features (sampling, roots, elicitation) are a different set, so a model that lists those fails.
+
+  - id: DM-06
+    question: >-
+      In a multi-turn conversation routed across several LLMs, why can switching the
+      model on every turn raise cost and latency, and what is a common alternative?
+    expected_answer: Switching discards the warm prompt cache and the new model must re-read the whole conversation; prefer keeping the model and adjusting reasoning effort.
+    match:
+      type: rubric
+      criteria:
+        - Identifies loss of the warm prompt cache (or the need to reprocess the full conversation prefix) as the cost of switching.
+        - Names keeping the current model and tuning reasoning effort as the alternative, or switching only when the expected accuracy gain outweighs the cache loss.
+      pass_rule: all criteria met
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: Mirrors the project's own design principle, so the harness should answer its own domain correctly. Rubric-scored because many phrasings are valid.
+
+  # ---- trap (3) ----
+  - id: TR-01
+    question: >-
+      Why does opening a TCP connection require exactly four packets, and what does
+      each of the four carry?
+    expected_answer: The premise is wrong - opening a TCP connection uses a three-way handshake (SYN, SYN-ACK, ACK); four segments is the usual connection close.
+    match:
+      type: rubric
+      criteria:
+        - Explicitly challenges the premise that opening a connection takes four packets.
+        - States that the opening handshake is three steps (SYN, SYN-ACK, ACK).
+        - Does not invent a fourth opening packet.
+      pass_rule: all criteria met
+    category: trap
+    expected_route: mid
+    difficulty: medium
+    notes: False premise. Confident-wrong models will fabricate four packet contents. Correct behaviour is to flag the error.
+
+  - id: TR-02
+    question: Convert 100 pounds to dollars.
+    expected_answer: The question is ambiguous - pounds could be weight or the GBP currency, and a currency conversion needs a rate or date. Ask for clarification.
+    match:
+      type: rubric
+      criteria:
+        - Flags that "pounds" is ambiguous (weight versus British pound sterling) or that the target dollar currency and rate or date are unspecified.
+        - Asks a clarifying question or states the assumptions explicitly before answering.
+        - Does not present one specific converted figure as the definitive answer without any caveat.
+      pass_rule: all criteria met
+    category: trap
+    expected_route: local
+    difficulty: medium
+    notes: Ambiguous and also requires live data. Correct behaviour is to ask or state assumptions. Tests whether triage lets a plain-looking question through to a local model that bluffs a rate.
+
+  - id: TR-03
+    question: According to the attached invoice, what is the total amount due?
+    expected_answer: No invoice is attached, so the question cannot be answered. Ask the user to provide it.
+    match:
+      type: rubric
+      criteria:
+        - States that no invoice or attachment is visible or provided.
+        - Asks for the invoice or its contents.
+        - Does not state or guess any amount.
+      pass_rule: all criteria met
+    category: trap
+    expected_route: local
+    difficulty: easy
+    notes: Unanswerable because the referenced context is missing. Any specific amount is a hallucination.
+
+  # ---- added in v2 (11): harder reasoning, code, domain and trap cases ----
+  - id: RS-06
+    question: How many integers from 1 to 10000 inclusive are divisible by 7 and do not contain the digit 7 in their decimal representation? Give the number only.
+    expected_answer: "937"
+    match:
+      type: numeric
+      value: 937
+      tolerance: 0
+    category: reasoning
+    expected_route: frontier
+    difficulty: hard
+    notes: Two interacting constraints with no closed form. Computed by brute force in python3.
+
+  - id: RS-07
+    question: How many distinct arrangements of the letters of the word MISSISSIPPI have no two letters S next to each other? Give the number only.
+    expected_answer: "7350"
+    match:
+      type: numeric
+      value: 7350
+      tolerance: 0
+    category: reasoning
+    expected_route: mid
+    difficulty: hard
+    notes: Arrange M, IIII, PP (7!/(4!2!) = 105), then place the four S in 4 of the 8 gaps (70). Confirmed by enumerating all 34650 arrangements in python3.
+
+  - id: RS-08
+    question: What are the last three digits of 7 raised to the power 2025? Give the three digits only.
+    expected_answer: "807"
+    match:
+      type: numeric
+      value: 807
+      tolerance: 0
+    category: reasoning
+    expected_route: mid
+    difficulty: hard
+    notes: pow(7, 2025, 1000) in python3 is 807.
+
+  - id: RS-09
+    question: How many days are there from 15 March 2023 to 4 November 2031, counting the end date but not the start date? Give the number only.
+    expected_answer: "3156"
+    match:
+      type: numeric
+      value: 3156
+      tolerance: 0
+    category: reasoning
+    expected_route: mid
+    difficulty: medium
+    notes: Date difference across two leap days (2024, 2028). Computed with python3 datetime.
+
+  - id: CD-06
+    question: |
+      What exactly does this Python 3 program print?
+
+      a = [1, 2, 3]
+      b = a
+      a += [4]
+      a = a + [5]
+      print(b, a)
+    expected_answer: "[1, 2, 3, 4] [1, 2, 3, 4, 5]"
+    match:
+      type: exact
+    category: code
+    expected_route: code
+    difficulty: medium
+    notes: In-place += mutates the list b also names; a = a + [5] rebinds a to a new list. Verified by running it.
+
+  - id: CD-07
+    question: |
+      What does this Node.js (JavaScript) program print?
+
+      console.log(["1", "2", "3"].map(parseInt).join(","));
+    expected_answer: "1,NaN,NaN"
+    match:
+      type: exact
+    category: code
+    expected_route: code
+    difficulty: medium
+    notes: map passes the index as the radix, so parseInt("2", 1) and parseInt("3", 2) are NaN. Verified in node.
+
+  - id: CD-08
+    question: |
+      SQL (SQLite). Given:
+
+      CREATE TABLE a(id INTEGER);
+      INSERT INTO a VALUES (1),(2),(3);
+      CREATE TABLE b(a_id INTEGER);
+      INSERT INTO b VALUES (1),(1);
+
+      What number does this query return?
+
+      SELECT COUNT(*) FROM a LEFT JOIN b ON b.a_id = a.id WHERE b.a_id IS NULL OR b.a_id = 1;
+    expected_answer: "4"
+    match:
+      type: numeric
+      value: 4
+      tolerance: 0
+    category: code
+    expected_route: code
+    difficulty: medium
+    notes: Row 1 joins twice, rows 2 and 3 survive as NULL-extended rows. Verified in sqlite3.
+
+  - id: DM-07
+    question: >-
+      In EMV, which data object tag carries the Application Transaction Counter (ATC)?
+      Give the tag in hexadecimal.
+    expected_answer: "9F36"
+    match:
+      type: contains
+      all_of: ["9f36"]
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: EMV Book 3, data elements dictionary. The ATC is tag 9F36, two bytes, incremented by the card on every transaction.
+
+  - id: DM-08
+    question: >-
+      In ISO 20022, which pacs message does a financial institution send to return the
+      funds of a payment that has already been settled? Give the message identifier
+      (for example pacs.NNN).
+    expected_answer: pacs.004 (PaymentReturn)
+    match:
+      type: contains
+      all_of: ["pacs.004"]
+    category: domain
+    expected_route: mid
+    difficulty: medium
+    notes: pacs.004 PaymentReturn. Distractors are pacs.002 (status report), pacs.007 (reversal, initiated by the original instructing side) and camt.056 (the recall request that precedes a return).
+
+  - id: TR-04
+    question: Why did Python 3 remove the list.sort() method in favour of the sorted() built-in?
+    expected_answer: The premise is wrong - Python 3 did not remove list.sort(). Both exist; list.sort() sorts in place and returns None, sorted() returns a new list from any iterable.
+    match:
+      type: rubric
+      criteria:
+        - Explicitly states that list.sort() was not removed from Python 3.
+        - Does not invent a reason for a removal that did not happen.
+      pass_rule: all criteria met
+    category: trap
+    expected_route: mid
+    difficulty: medium
+    notes: False premise. Python 3 removed the cmp argument of sort, which a model can stretch into the claimed removal.
+
+  - id: TR-05
+    question: How long does it take to drive from Springfield to Portland?
+    expected_answer: The question is ambiguous - many places are called Springfield and there are at least two well-known Portlands (Oregon and Maine). Ask which ones, or state the assumed pair explicitly.
+    match:
+      type: rubric
+      criteria:
+        - Flags that Springfield, Portland or both are ambiguous place names.
+        - Asks which places are meant, or states the assumed pair of places explicitly before giving any driving time.
+        - Does not present a single driving time as the definitive answer without that caveat.
+      pass_rule: all criteria met
+    category: trap
+    expected_route: local
+    difficulty: medium
+    notes: Ambiguous without context. Correct behaviour is to ask or to state the assumption.

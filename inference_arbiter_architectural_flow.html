@@ -1,0 +1,1404 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Inference Arbiter - Architectural Flow</title>
+
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+          },
+          colors: {
+            blueprint: '#0b0f17',
+            surface: '#111827',
+            panel: '#0f1623',
+          }
+        }
+      }
+    };
+  </script>
+
+  <style>
+    /* Blueprint Dot Grid Background */
+    body {
+      background-color: #0b0f17;
+      background-image: radial-gradient(rgba(148, 163, 184, 0.14) 1px, transparent 1px);
+      background-size: 22px 22px;
+      color: #e2e8f0;
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0b0f17;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1e293b;
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #334155;
+    }
+
+    /* SVG Node Interactions */
+    .arch-node {
+      cursor: pointer;
+      transition: filter 0.18s ease, opacity 0.2s ease;
+    }
+    .arch-node:hover .node-bg {
+      filter: brightness(1.18);
+    }
+    .arch-node.selected .node-bg {
+      stroke-width: 2.5px;
+      filter: drop-shadow(0 0 10px var(--node-glow, rgba(59, 130, 246, 0.45)));
+    }
+    .arch-node.sim-active .node-bg {
+      stroke-width: 3px;
+      filter: drop-shadow(0 0 16px var(--node-glow, rgba(59, 130, 246, 0.85)));
+    }
+    .arch-node.sim-dim {
+      opacity: 0.38;
+    }
+
+    /* SVG Edge States */
+    .arch-edge {
+      transition: stroke 0.2s ease, stroke-width 0.2s ease, opacity 0.2s ease;
+    }
+    .arch-edge.sim-dim {
+      opacity: 0.22;
+    }
+    .arch-edge.sim-highlight {
+      stroke-width: 2.8px !important;
+      opacity: 1 !important;
+    }
+
+    /* Animated Packet Glow */
+    .packet-dot {
+      filter: drop-shadow(0 0 6px currentColor);
+      pointer-events: none;
+    }
+
+    /* Syntax Highlighting Tokens */
+    .tok-kw { color: #c084fc; }      /* violet */
+    .tok-fn { color: #60a5fa; }      /* blue */
+    .tok-str { color: #34d399; }     /* emerald */
+    .tok-num { color: #fbbf24; }     /* amber */
+    .tok-cm { color: #64748b; font-style: italic; } /* slate */
+    .tok-cls { color: #22d3ee; }     /* cyan */
+  </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased selection:bg-blue-500/30 selection:text-blue-200">
+
+  <!-- Top Header & Navigation -->
+  <header class="border-b border-slate-800/90 bg-[#0b0f17]/90 backdrop-blur-md sticky top-0 z-30">
+    <div class="max-w-[1600px] mx-auto px-4 sm:px-6 py-4">
+      <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <!-- Title & Stack Summary -->
+        <div>
+          <div class="flex items-center gap-2.5 flex-wrap">
+            <span class="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-blue-500/15 border border-blue-500/40 text-blue-400 font-mono text-xs font-bold">
+              AI
+            </span>
+            <h1 class="text-lg sm:text-xl font-semibold tracking-tight text-slate-50">
+              Inference Arbiter - Architectural Flow
+            </h1>
+            <span class="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono bg-slate-800/80 text-slate-300 border border-slate-700">
+              Python Blueprint
+            </span>
+          </div>
+          <p class="text-xs sm:text-sm text-slate-400 mt-1">
+            Progressive multi-model chaining: cost-aware routing, deterministic verification against "confident wrong" answers, and MicroVM tool isolation.
+          </p>
+        </div>
+
+        <!-- Compact Stack Summary Pills -->
+        <div class="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+          <span class="px-2.5 py-1 rounded-md bg-blue-500/10 border border-blue-500/30 text-blue-300">Python + Jev</span>
+          <span class="px-2.5 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">Ollama / llama.cpp</span>
+          <span class="px-2.5 py-1 rounded-md bg-violet-500/10 border border-violet-500/30 text-violet-300">OpenRouter / frontier model</span>
+          <span class="px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300">Pydantic + SQLite</span>
+          <span class="px-2.5 py-1 rounded-md bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">Docker sbx + MCP</span>
+        </div>
+      </div>
+
+      <!-- 3-Tab Navigation Bar -->
+      <nav class="flex flex-wrap gap-2 mt-4" role="tablist" aria-label="Architecture Phases">
+        <button
+          id="tab-phase1"
+          role="tab"
+          aria-selected="true"
+          onclick="switchTab('phase1')"
+          class="tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all border flex items-center gap-2"
+        >
+          <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+          Phase 1: Bare-Metal Router
+        </button>
+        <button
+          id="tab-phase2"
+          role="tab"
+          aria-selected="false"
+          onclick="switchTab('phase2')"
+          class="tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all border flex items-center gap-2"
+        >
+          <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+          Phase 2: Verification &amp; Evals
+        </button>
+        <button
+          id="tab-phase3"
+          role="tab"
+          aria-selected="false"
+          onclick="switchTab('phase3')"
+          class="tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all border flex items-center gap-2"
+        >
+          <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+          Phase 3: Tools &amp; Docker Sandbox
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <main class="flex-1 max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-5 flex flex-col lg:flex-row gap-5">
+
+    <!-- Left/Center (~68%): Interactive Diagram + Simulation Controls + Trace Log -->
+    <section class="w-full lg:w-[68%] flex flex-col gap-3.5 min-w-0">
+
+      <!-- Toolbar: Phase Summary + Simulation Buttons -->
+      <div class="bg-[#0f1623]/95 border border-slate-800 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div class="min-w-0">
+          <div id="phase-heading" class="text-sm font-semibold text-slate-100"></div>
+          <div id="phase-sub" class="text-xs text-slate-400 mt-0.5"></div>
+        </div>
+        <div id="sim-controls" class="flex flex-wrap items-center gap-2 shrink-0">
+          <!-- Populated dynamically per tab -->
+        </div>
+      </div>
+
+      <!-- SVG Blueprint Canvas Container -->
+      <div class="bg-[#0d131f]/90 border border-slate-800 rounded-xl overflow-hidden relative shadow-2xl shadow-black/40">
+        <!-- Color Legend Strip -->
+        <div class="px-4 py-2 border-b border-slate-800/80 bg-[#0b0f17]/70 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-slate-200/90"></span>Input / Output</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-blue-500"></span>Control &amp; Routing</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-emerald-500"></span>Local Specialist</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-violet-500"></span>Cloud / Frontier</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500"></span>Verify &amp; Evals</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-cyan-500"></span>Sandbox / MCP</span>
+          </div>
+          <span class="font-mono text-[10px] text-slate-500">Click any node to inspect</span>
+        </div>
+
+        <!-- Responsive SVG Diagram (960x580 fixed aspect ratio for pixel-perfect edges) -->
+        <div class="w-full overflow-x-auto">
+          <svg
+            id="arch-svg"
+            viewBox="0 0 960 580"
+            class="w-full h-auto min-w-[680px] block select-none"
+            xmlns="http://www.w3.org/2000/svg"
+            role="img"
+            aria-label="Interactive Architectural Flow Diagram"
+          >
+            <!-- Rendered dynamically by JS -->
+          </svg>
+        </div>
+      </div>
+
+      <!-- Live Simulation Trace Log -->
+      <div class="bg-[#0f1623]/95 border border-slate-800 rounded-xl p-3.5">
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center gap-2">
+            <span id="trace-status-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
+            <span class="text-xs font-mono font-semibold uppercase tracking-wider text-slate-300">Live Execution Trace</span>
+          </div>
+          <span id="trace-meta" class="text-[11px] font-mono text-slate-500">Idle - Select a simulation above</span>
+        </div>
+        <div
+          id="trace-log"
+          class="font-mono text-xs bg-[#090d14] border border-slate-800/80 rounded-lg p-3 min-h-[76px] max-h-[145px] overflow-y-auto space-y-1.5 text-slate-400"
+        >
+          <div class="text-slate-500">// Click a "Simulate Flow" button to step a live request packet through the active phase.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right (~32%): Node Inspector Panel -->
+    <aside class="w-full lg:w-[32%] flex flex-col min-w-0">
+      <div class="bg-[#0f1623]/95 border border-slate-800 rounded-xl flex flex-col h-full shadow-2xl shadow-black/30 overflow-hidden">
+        <!-- Inspector Header -->
+        <div class="px-4 py-3 border-b border-slate-800 bg-[#0b0f17]/60 flex items-center justify-between">
+          <span class="text-xs font-mono font-semibold uppercase tracking-wider text-slate-400">Node Inspector</span>
+          <span id="insp-badge" class="px-2 py-0.5 rounded-md text-[11px] font-mono font-medium border"></span>
+        </div>
+
+        <!-- Inspector Body -->
+        <div class="p-4 sm:p-5 flex-1 flex flex-col gap-4 overflow-y-auto">
+          <div>
+            <h2 id="insp-title" class="text-base sm:text-lg font-semibold text-slate-50 leading-snug"></h2>
+            <p id="insp-subtitle" class="text-xs font-mono text-slate-400 mt-1"></p>
+          </div>
+
+          <!-- Role -->
+          <div class="bg-[#0b0f17]/70 border border-slate-800/80 rounded-lg p-3">
+            <div class="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Architectural Role</div>
+            <p id="insp-role" class="text-xs sm:text-[13px] text-slate-300 leading-relaxed"></p>
+          </div>
+
+          <!-- Stack / Runtime -->
+          <div class="bg-[#0b0f17]/70 border border-slate-800/80 rounded-lg p-3">
+            <div class="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Stack &amp; Runtime</div>
+            <p id="insp-stack" class="text-xs font-mono text-slate-200 leading-relaxed"></p>
+          </div>
+
+          <!-- Failure Mode Mitigated -->
+          <div class="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">
+            <div class="text-[10px] font-mono uppercase tracking-wider text-amber-400/90 mb-1">Failure Mode Mitigated</div>
+            <p id="insp-failure" class="text-xs sm:text-[13px] text-slate-300 leading-relaxed"></p>
+          </div>
+
+          <!-- Code Snippet -->
+          <div class="flex flex-col flex-1 min-h-[160px]">
+            <div class="flex items-center justify-between mb-1.5">
+              <span id="insp-code-label" class="text-[10px] font-mono uppercase tracking-wider text-slate-500">Implementation Snippet</span>
+              <button
+                id="copy-btn"
+                onclick="copySnippet()"
+                class="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
+              >
+                Copy
+              </button>
+            </div>
+            <pre class="flex-1 bg-[#080c13] border border-slate-800 rounded-lg p-3.5 overflow-x-auto text-[11.5px] leading-relaxed font-mono text-slate-200"><code id="insp-code"></code></pre>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+  </main>
+
+  <script>
+    // =========================================================================
+    // CATEGORY COLOR PALETTE
+    // =========================================================================
+    const CATEGORIES = {
+      io: {
+        label: 'Input / Output',
+        stroke: '#cbd5e1',
+        fill: '#131c2e',
+        text: '#f8fafc',
+        sub: '#94a3b8',
+        glow: 'rgba(226, 232, 240, 0.45)',
+        badgeClass: 'bg-slate-200/10 text-slate-200 border-slate-400/40'
+      },
+      control: {
+        label: 'Control & Routing',
+        stroke: '#3b82f6',
+        fill: '#0f1b33',
+        text: '#eff6ff',
+        sub: '#93c5fd',
+        glow: 'rgba(59, 130, 246, 0.6)',
+        badgeClass: 'bg-blue-500/15 text-blue-300 border-blue-500/40'
+      },
+      local: {
+        label: 'Local Specialist',
+        stroke: '#10b981',
+        fill: '#0c2320',
+        text: '#ecfdf5',
+        sub: '#6ee7b7',
+        glow: 'rgba(16, 185, 129, 0.6)',
+        badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+      },
+      cloud: {
+        label: 'Cloud / Frontier',
+        stroke: '#8b5cf6',
+        fill: '#1b1433',
+        text: '#f5f3ff',
+        sub: '#c4b5fd',
+        glow: 'rgba(139, 92, 246, 0.6)',
+        badgeClass: 'bg-violet-500/15 text-violet-300 border-violet-500/40'
+      },
+      verify: {
+        label: 'Verification & Evals',
+        stroke: '#f59e0b',
+        fill: '#241a0d',
+        text: '#fffbeb',
+        sub: '#fcd34d',
+        glow: 'rgba(245, 158, 11, 0.6)',
+        badgeClass: 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+      },
+      sandbox: {
+        label: 'Sandbox / MicroVM',
+        stroke: '#06b6d4',
+        fill: '#0b222c',
+        text: '#ecfeff',
+        sub: '#67e8f9',
+        glow: 'rgba(6, 182, 212, 0.65)',
+        badgeClass: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40'
+      }
+    };
+
+    // =========================================================================
+    // PHASE ARCHITECTURE DEFINITIONS
+    // =========================================================================
+    const PHASES = {
+      // -----------------------------------------------------------------------
+      // PHASE 1: BARE-METAL ROUTER
+      // -----------------------------------------------------------------------
+      phase1: {
+        heading: 'Phase 1 - Bare-Metal Router (Local + Cloud)',
+        sub: 'One question in, one answer out, zero autonomous loops. Deterministic Python routing with async SQLite telemetry.',
+        defaultNode: 'p1_router',
+        frames: [],
+        nodes: [
+          {
+            id: 'p1_input',
+            cat: 'io',
+            x: 20, y: 215, w: 125, h: 72,
+            title: 'User Query',
+            sub: 'CLI / API Input',
+            tag: 'INPUT',
+            role: 'Entry point for a single Q&A request. Normalized into a typed Request object with a unique trace_id before triage.',
+            stack: 'Python 3.11+ | FastAPI / Typer CLI',
+            failure: 'Prevents untraceable prompts by attaching correlation IDs and timestamps at the edge.',
+            codeLang: 'Python',
+            code: `from dataclasses import dataclass\nimport uuid, time\n\n@dataclass\nclass QueryRequest:\n    prompt: str\n    trace_id: str = uuid.uuid4().hex[:8]\n    ts: float = time.time()`
+          },
+          {
+            id: 'p1_triage',
+            cat: 'control',
+            x: 180, y: 215, w: 155, h: 72,
+            title: 'Fast Triage',
+            sub: 'Jev / Small Classifier',
+            tag: '~200ms',
+            role: 'Acts as a sub-second "System One" classifier. Returns a typed route label (local_fast, mid_cloud, frontier) plus a calibrated confidence score.',
+            stack: 'Jev (TypeSafe) or local 1B-3B classifier',
+            failure: 'Avoids burning frontier tokens just to decide which model should answer a routine question.',
+            codeLang: 'Python',
+            code: `# Sub-second typed routing classification\ndecision = jev.classify(\n    text=req.prompt,\n    labels=["local_fast", "mid_cloud", "frontier"]\n)\n# -> Decision(label="local_fast", confidence=0.92)`
+          },
+          {
+            id: 'p1_router',
+            cat: 'control',
+            x: 370, y: 215, w: 155, h: 72,
+            title: 'Python Router',
+            sub: 'if/else Thresholds',
+            tag: 'DETERMINISTIC',
+            role: 'Plain Python control plane with zero autonomous loops. Enforces explicit confidence cutoffs and reads model mappings from config.',
+            stack: 'Python | PyYAML | OpenAI SDK',
+            failure: 'Eliminates unpredictable agent looping and prevents low-confidence small models from guessing on hard queries.',
+            codeLang: 'Python',
+            code: `def select_tier(decision) -> str:\n    # Escalate automatically if triage is uncertain\n    if decision.confidence < 0.80:\n        return "frontier"\n    if decision.label == "local_fast":\n        return "local"\n    return decision.label`
+          },
+          {
+            id: 'p1_local',
+            cat: 'local',
+            x: 595, y: 58, w: 185, h: 74,
+            title: 'Local Specialist Tier',
+            sub: 'Ollama / llama.cpp',
+            tag: 'localhost:11434/v1',
+            role: 'Handles routine Q&A, summarization, and narrow domain lookups on local hardware at zero marginal API cost.',
+            stack: 'Ollama / llama.cpp | OpenAI-compatible SDK',
+            failure: 'Avoids unnecessary cloud latency, API spend, and external data exposure for straightforward tasks.',
+            codeLang: 'Python',
+            code: `from openai import OpenAI\n\nlocal_client = OpenAI(\n    base_url="http://localhost:11434/v1",\n    api_key="ollama"  # required by SDK, unused locally\n)\nresp = local_client.chat.completions.create(\n    model="qwen2.5:7b", messages=msgs\n)`
+          },
+          {
+            id: 'p1_mid',
+            cat: 'cloud',
+            x: 595, y: 214, w: 185, h: 74,
+            title: 'Mid-Tier Cloud',
+            sub: 'OpenRouter Unified API',
+            tag: 'BALANCED',
+            role: 'Workhorse cloud tier for multi-fact synthesis or moderate coding questions where local models lose nuance.',
+            stack: 'OpenRouter API | Config-driven model ID',
+            failure: 'Prevents overpaying for frontier reasoning when a fast mid-tier cloud model achieves equivalent accuracy.',
+            codeLang: 'YAML',
+            code: `# models.yaml - swap models without touching code\ntiers:\n  local:    "qwen2.5:7b"\n  mid:      "vendor/mid-model"\n  frontier: "vendor/frontier-model"`
+          },
+          {
+            id: 'p1_frontier',
+            cat: 'cloud',
+            x: 595, y: 370, w: 185, h: 74,
+            title: 'Frontier Escalation',
+            sub: 'OpenRouter -> frontier model',
+            tag: 'HARD REASONING',
+            role: 'Reserved strictly for high-ambiguity, complex reasoning, or low-confidence escalations where accuracy outweighs token cost.',
+            stack: 'OpenRouter | frontier model',
+            failure: 'Stops smaller models from hallucinating on subtle architectural, legal, or multi-step analytical questions.',
+            codeLang: 'Python',
+            code: `cloud_client = OpenAI(\n    base_url="https://openrouter.ai/api/v1",\n    api_key=os.environ["OPENROUTER_API_KEY"]\n)\nresp = cloud_client.chat.completions.create(\n    model=cfg["tiers"]["frontier"],\n    messages=msgs\n)`
+          },
+          {
+            id: 'p1_output',
+            cat: 'io',
+            x: 825, y: 215, w: 115, h: 72,
+            title: 'Unified Output',
+            sub: 'Response + Meta',
+            tag: 'OUTPUT',
+            role: 'Returns the final answer to the user along with transparent metadata (tier used, latency_ms, estimated cost).',
+            stack: 'Python Pydantic Response Model',
+            failure: 'Surfaces which model answered the query so the user knows whether a local or frontier model produced it.',
+            codeLang: 'Python',
+            code: `return {\n    "trace_id": req.trace_id,\n    "tier": tier,\n    "model": model_id,\n    "latency_ms": elapsed_ms,\n    "answer": resp.choices[0].message.content\n}`
+          },
+          {
+            id: 'p1_telemetry',
+            cat: 'verify',
+            x: 370, y: 478, w: 295, h: 72,
+            title: 'Telemetry Logger',
+            sub: 'SQLite / JSONL Side-Tap',
+            tag: 'ASYNC AUDIT',
+            role: 'Records every run (prompt, triage score, route chosen, model, latency, token cost) asynchronously without blocking the user response.',
+            stack: 'SQLite3 / JSONL | Background Thread',
+            failure: 'Prevents "blind optimization"-gives you hard empirical data before you tune routing thresholds in Phase 2.',
+            codeLang: 'Python',
+            code: `conn.execute(\n    """INSERT INTO runs\n       (trace_id, route, confidence, model, ms, cost)\n       VALUES (?, ?, ?, ?, ?, ?)""",\n    (req.trace_id, tier, conf, model, ms, cost)\n)\nconn.commit()`
+          }
+        ],
+        edges: [
+          { id: 'e1_in_tr', from: 'p1_input', to: 'p1_triage', d: 'M 145 251 L 180 251', color: '#94a3b8' },
+          { id: 'e1_tr_rt', from: 'p1_triage', to: 'p1_router', d: 'M 335 251 L 370 251', color: '#3b82f6', label: 'route + conf', lx: 352, ly: 202 },
+          { id: 'e1_rt_loc', from: 'p1_router', to: 'p1_local', d: 'M 525 232 L 555 232 L 555 95 L 595 95', color: '#10b981', label: 'simple (>=0.8)', lx: 552, ly: 76 },
+          { id: 'e1_rt_mid', from: 'p1_router', to: 'p1_mid', d: 'M 525 251 L 595 251', color: '#8b5cf6', label: 'mid', lx: 560, ly: 238 },
+          { id: 'e1_rt_fr', from: 'p1_router', to: 'p1_frontier', d: 'M 525 270 L 555 270 L 555 407 L 595 407', color: '#8b5cf6', label: 'conf < 0.8', lx: 545, ly: 428 },
+          { id: 'e1_loc_out', from: 'p1_local', to: 'p1_output', d: 'M 780 95 L 802 95 L 802 232 L 825 232', color: '#10b981' },
+          { id: 'e1_mid_out', from: 'p1_mid', to: 'p1_output', d: 'M 780 251 L 825 251', color: '#8b5cf6' },
+          { id: 'e1_fr_out', from: 'p1_frontier', to: 'p1_output', d: 'M 780 407 L 802 407 L 802 270 L 825 270', color: '#8b5cf6' },
+          { id: 'e1_rt_tel', from: 'p1_router', to: 'p1_telemetry', d: 'M 447 287 L 447 478', color: '#f59e0b', dashed: true, label: 'async route tap', lx: 447, ly: 392 },
+          { id: 'e1_out_tel', from: 'p1_output', to: 'p1_telemetry', d: 'M 882 287 L 882 514 L 665 514', color: '#f59e0b', dashed: true, label: 'latency & token cost', lx: 780, ly: 500 }
+        ],
+        simulations: [
+          {
+            id: 'sim_p1_local',
+            label: 'Simulate: Simple Local Query',
+            accent: 'emerald',
+            steps: [
+              { node: 'p1_input', msg: 'Received query: "Convert this cron expression 0 3 * * 1 to English."' },
+              { edge: 'e1_in_tr', node: 'p1_triage', msg: 'Jev classifier returned label="local_fast", confidence=0.94 (182ms).' },
+              { edge: 'e1_tr_rt', node: 'p1_router', msg: 'Python threshold check passed (0.94 >= 0.80) -> routing to Branch A.' },
+              { edge: 'e1_rt_loc', node: 'p1_local', msg: 'Ollama (qwen2.5:7b) generated answer locally at $0.0000 API cost (310ms).' },
+              { edge: 'e1_loc_out', node: 'p1_output', msg: 'Unified response returned to user (total: 492ms, tier: local).' },
+              { edge: 'e1_out_tel', node: 'p1_telemetry', msg: 'Async SQLite write complete: logged trace_id, route, latency, $0.00 cost.' }
+            ]
+          },
+          {
+            id: 'sim_p1_escalate',
+            label: 'Simulate: Complex Escalation',
+            accent: 'violet',
+            steps: [
+              { node: 'p1_input', msg: 'Received query: "Compare Raft vs Paxos split-brain recovery under asymmetric partitions."' },
+              { edge: 'e1_in_tr', node: 'p1_triage', msg: 'Jev classifier returned label="mid_cloud", confidence=0.61 (195ms).' },
+              { edge: 'e1_tr_rt', node: 'p1_router', msg: 'Confidence 0.61 < 0.80 threshold -> deterministic escalation to Frontier Tier.' },
+              { edge: 'e1_rt_fr', node: 'p1_frontier', msg: 'OpenRouter dispatched to the frontier model for deep reasoning (1,840ms).' },
+              { edge: 'e1_fr_out', node: 'p1_output', msg: 'Unified response returned to user (total: 2,035ms, tier: frontier).' },
+              { edge: 'e1_out_tel', node: 'p1_telemetry', msg: 'Async SQLite write complete: logged escalation reason & token spend.' }
+            ]
+          }
+        ]
+      },
+
+      // -----------------------------------------------------------------------
+      // PHASE 2: VERIFICATION & EVALS
+      // -----------------------------------------------------------------------
+      phase2: {
+        heading: 'Phase 2 - Verification & Evals (Tackling "Confident Wrong")',
+        sub: 'Strict Pydantic schema handoffs, groundedness verification with a single Frontier repair loop, and offline baseline benchmarking.',
+        defaultNode: 'p2_pydantic',
+        frames: [
+          {
+            x: 24, y: 404, w: 912, h: 156,
+            stroke: '#f59e0b',
+            fill: 'rgba(245, 158, 11, 0.04)',
+            title: 'OFFLINE EVAL HARNESS - BENCHMARKING & REGRESSION SUITE',
+            sub: '30-50 Curated Test Questions | Compares Multi-Model Chain vs. Single Mid-Tier Baseline (Cost / Latency / Accuracy)'
+          }
+        ],
+        nodes: [
+          {
+            id: 'p2_input',
+            cat: 'io',
+            x: 25, y: 58, w: 125, h: 72,
+            title: 'User Query',
+            sub: 'Question + Docs',
+            tag: 'INPUT',
+            role: 'Accepts user question plus optional retrieved context chunks or document pointers.',
+            stack: 'Python Request Pipeline',
+            failure: 'Separates raw user input from system instructions to reduce prompt confusion.',
+            codeLang: 'Python',
+            code: `req = QARequest(\n    question=user_text,\n    source_docs=retrieved_chunks\n)`
+          },
+          {
+            id: 'p2_router',
+            cat: 'control',
+            x: 190, y: 58, w: 170, h: 72,
+            title: 'Triage & Router',
+            sub: 'Jev + Python Rules',
+            tag: 'ROUTE',
+            role: 'Classifies task complexity and selects the initial generation tier while enforcing budget and confidence guardrails.',
+            stack: 'Jev Classifier + Python Policy',
+            failure: 'Prevents misrouting high-stakes analytical questions to underpowered local models.',
+            codeLang: 'Python',
+            code: `route = router.classify(req.question)\ntier = "frontier" if route.conf < 0.8 else route.tier`
+          },
+          {
+            id: 'p2_prep',
+            cat: 'local',
+            x: 405, y: 58, w: 185, h: 72,
+            title: 'Context Prep & Rewrite',
+            sub: 'Local LLM (Ollama)',
+            tag: 'PRE-PROCESS',
+            role: 'Uses a fast local model to rewrite ambiguous queries, extract key entities, and strip irrelevant noise from retrieved context.',
+            stack: 'Ollama (llama3.2 / qwen2.5) | JSON Mode',
+            failure: 'Prevents bloated, noisy context windows from distracting downstream reasoning models.',
+            codeLang: 'Python',
+            code: `raw_json = ollama_chat(\n    model="qwen2.5:7b",\n    system="Extract search_terms and clean_facts as JSON.",\n    user=req.question\n)`
+          },
+          {
+            id: 'p2_pydantic',
+            cat: 'verify',
+            x: 640, y: 58, w: 195, h: 72,
+            title: 'Pydantic Schema Gate',
+            sub: 'Strict JSON Validation',
+            tag: 'HARD GATE',
+            role: 'Validates intermediate LLM output against a strict Pydantic schema. On ValidationError, catches the exception in Python and escalates the step.',
+            stack: 'Pydantic v2 | try/except Escalation',
+            failure: 'Stops malformed or missing fields from silently poisoning downstream chain steps (error propagation).',
+            codeLang: 'Python',
+            code: `class PrepPayload(BaseModel):\n    rewritten_query: str\n    key_facts: list[str]\n\ntry:\n    payload = PrepPayload.model_validate_json(raw_json)\nexcept ValidationError:\n    # Escalate extraction to stronger cloud model\n    payload = escalate_prep(req.question)`
+          },
+          {
+            id: 'p2_gen',
+            cat: 'cloud',
+            x: 640, y: 228, w: 195, h: 74,
+            title: 'Routed Generation',
+            sub: 'Local / Mid / Frontier',
+            tag: 'SYNTHESIS',
+            role: 'Generates a structured draft answer with inline citations using the selected model tier (or Frontier model if escalated/repaired).',
+            stack: 'Ollama / OpenRouter / frontier model',
+            failure: 'Keeps generation focused strictly on the validated, cleaned payload rather than raw noisy text.',
+            codeLang: 'Python',
+            code: `draft = generate_answer(\n    tier=active_tier,\n    query=payload.rewritten_query,\n    facts=payload.key_facts\n)`
+          },
+          {
+            id: 'p2_verify',
+            cat: 'verify',
+            x: 345, y: 228, w: 215, h: 74,
+            title: 'Groundedness Verifier',
+            sub: 'Deterministic + Fact Check',
+            tag: 'ANTI-HALLUCINATION',
+            role: 'Checks whether every claim in the draft answer is supported by retrieved context. If ungrounded, triggers at most ONE repair loop to Frontier.',
+            stack: 'Python Assertions + Jev / Verifier Call',
+            failure: 'Directly catches "confident wrong" hallucinations before they ever reach the user.',
+            codeLang: 'Python',
+            code: `check = verify_groundedness(draft, payload.key_facts)\nif not check.is_grounded and retries == 0:\n    # Bounded single repair loop to Frontier\n    draft = repair_with_frontier(\n        draft, critique=check.unsupported_claims\n    )`
+          },
+          {
+            id: 'p2_output',
+            cat: 'io',
+            x: 80, y: 228, w: 165, h: 74,
+            title: 'Verified Answer',
+            sub: 'Grounded Output',
+            tag: 'OUTPUT',
+            role: 'Delivers the verified response along with citation support status and whether a schema escalation or repair occurred.',
+            stack: 'Python Typed Response',
+            failure: 'Ensures users receive auditable, grounded answers rather than plausible-sounding guesses.',
+            codeLang: 'Python',
+            code: `return VerifiedResponse(\n    answer=draft.text,\n    grounded=True,\n    repair_used=(retries > 0)\n)`
+          },
+          {
+            id: 'p2_sqlite',
+            cat: 'verify',
+            x: 55, y: 462, w: 225, h: 72,
+            title: 'SQLite Telemetry Store',
+            sub: 'Runs, Repairs & Costs',
+            tag: 'PERSISTENCE',
+            role: 'Stores every production and eval run, tracking schema failure rates, repair loop frequency, latency, and token cost.',
+            stack: 'SQLite3 (local evals.db)',
+            failure: 'Reveals if a cheap local model fails schema validation so often that escalation costs more than calling mid-tier directly.',
+            codeLang: 'SQL',
+            code: `SELECT tier,\n       AVG(latency_ms) AS avg_ms,\n       SUM(schema_fails) AS fails,\n       ROUND(SUM(cost_usd), 4) AS total_cost\nFROM qa_runs GROUP BY tier;`
+          },
+          {
+            id: 'p2_eval',
+            cat: 'verify',
+            x: 365, y: 462, w: 245, h: 72,
+            title: 'Eval Runner (30-50 Qs)',
+            sub: 'Golden Test Suite',
+            tag: 'BENCHMARK',
+            role: 'Replays a fixed dataset of 30-50 representative questions through the harness after every prompt, threshold, or model swap.',
+            stack: 'pytest / Custom Python Eval Script',
+            failure: 'Catches silent accuracy regressions when swapping local models or tightening routing thresholds.',
+            codeLang: 'Python',
+            code: `for case in load_golden_set("evals_50.jsonl"):\n    chain_res = run_harness(case.question)\n    base_res  = run_single_midtier(case.question)\n    score_and_log(case, chain_res, base_res)`
+          },
+          {
+            id: 'p2_baseline',
+            cat: 'cloud',
+            x: 690, y: 462, w: 220, h: 72,
+            title: 'Chain vs. Baseline',
+            sub: 'Cost | Latency | Accuracy',
+            tag: 'SCORECARD',
+            role: 'Side-by-side comparison proving whether the multi-step chain actually beats a single direct mid-tier cloud call.',
+            stack: 'Markdown / CLI Scorecard Report',
+            failure: 'Prevents over-engineering: forces the chain to justify its added latency and complexity with real numbers.',
+            codeLang: 'YAML',
+            code: `# Sample Benchmark Scorecard (50 Questions)\nchain_vs_midtier_baseline:\n  accuracy: "+4.2% (94% vs 89.8%)"\n  cost:     "-58%  ($0.14 vs $0.33)"\n  p95_ms:   "+210ms (acceptable)"`
+          }
+        ],
+        edges: [
+          { id: 'e2_in_rt', from: 'p2_input', to: 'p2_router', d: 'M 150 94 L 190 94', color: '#94a3b8' },
+          { id: 'e2_rt_pr', from: 'p2_router', to: 'p2_prep', d: 'M 360 94 L 405 94', color: '#3b82f6' },
+          { id: 'e2_pr_py', from: 'p2_prep', to: 'p2_pydantic', d: 'M 590 94 L 640 94', color: '#10b981', label: 'raw JSON', lx: 615, ly: 76 },
+          { id: 'e2_py_gen_ok', from: 'p2_pydantic', to: 'p2_gen', d: 'M 710 130 L 710 228', color: '#10b981', label: 'Valid JSON', lx: 668, ly: 178 },
+          { id: 'e2_py_gen_esc', from: 'p2_pydantic', to: 'p2_gen', d: 'M 775 130 L 775 162 L 888 162 L 888 265 L 835 265', color: '#f59e0b', dashed: true, label: 'Schema Fail -> Escalate', lx: 855, ly: 148 },
+          { id: 'e2_gen_ver', from: 'p2_gen', to: 'p2_verify', d: 'M 640 265 L 560 265', color: '#8b5cf6', label: 'Draft', lx: 600, ly: 248 },
+          { id: 'e2_ver_rep', from: 'p2_verify', to: 'p2_gen', d: 'M 452 302 L 452 356 L 737 356 L 737 302', color: '#f59e0b', dashed: true, label: 'Fail -> 1x Frontier Repair Loop', lx: 595, ly: 342 },
+          { id: 'e2_ver_out', from: 'p2_verify', to: 'p2_output', d: 'M 345 265 L 245 265', color: '#10b981', label: 'Grounded ok', lx: 295, ly: 248 },
+          { id: 'e2_out_sql', from: 'p2_output', to: 'p2_sqlite', d: 'M 162 302 L 162 462', color: '#f59e0b', dashed: true, label: 'telemetry log', lx: 162, ly: 374 },
+          { id: 'e2_sql_ev', from: 'p2_sqlite', to: 'p2_eval', d: 'M 280 498 L 365 498', color: '#f59e0b' },
+          { id: 'e2_ev_base', from: 'p2_eval', to: 'p2_baseline', d: 'M 610 498 L 690 498', color: '#8b5cf6', label: 'diff', lx: 650, ly: 482 }
+        ],
+        simulations: [
+          {
+            id: 'sim_p2_pass',
+            label: 'Simulate: Schema Pass & Grounded',
+            accent: 'emerald',
+            steps: [
+              { node: 'p2_input', msg: 'Query + 4 retrieved policy docs received.' },
+              { edge: 'e2_in_rt', node: 'p2_router', msg: 'Jev confidence=0.89 -> routed to Mid-Tier Cloud for synthesis.' },
+              { edge: 'e2_rt_pr', node: 'p2_prep', msg: 'Local Ollama stripped boilerplate and emitted structured JSON facts.' },
+              { edge: 'e2_pr_py', node: 'p2_pydantic', msg: 'Pydantic v2 validated PrepPayload schema cleanly (0 errors).' },
+              { edge: 'e2_py_gen_ok', node: 'p2_gen', msg: 'Mid-Tier model generated cited draft answer from clean payload.' },
+              { edge: 'e2_gen_ver', node: 'p2_verify', msg: 'Groundedness check passed: 4/4 claims backed by source chunks.' },
+              { edge: 'e2_ver_out', node: 'p2_output', msg: 'Verified Answer returned to user (0 repairs needed).' },
+              { edge: 'e2_out_sql', node: 'p2_sqlite', msg: 'Logged telemetry to SQLite for offline Eval Harness tracking.' }
+            ]
+          },
+          {
+            id: 'sim_p2_repair',
+            label: 'Simulate: Schema Fail / Repair Loop',
+            accent: 'amber',
+            steps: [
+              { node: 'p2_input', msg: 'Complex multi-clause compliance question received.' },
+              { edge: 'e2_in_rt', node: 'p2_router', msg: 'Router dispatched prep to local Ollama to minimize cost.' },
+              { edge: 'e2_rt_pr', node: 'p2_prep', msg: 'Local 7B model returned malformed JSON (missing key_facts list).' },
+              { edge: 'e2_pr_py', node: 'p2_pydantic', msg: 'Pydantic caught ValidationError! Triggering automatic tier escalation.' },
+              { edge: 'e2_py_gen_esc', node: 'p2_gen', msg: 'Escalated step succeeded on Mid-Tier Cloud; produced initial draft.' },
+              { edge: 'e2_gen_ver', node: 'p2_verify', msg: 'Groundedness Verifier flagged 1 unsupported claim ("confident wrong" caught!).' },
+              { edge: 'e2_ver_rep', node: 'p2_gen', msg: 'Single Repair Loop -> the frontier model rewrote answer strictly from sources.' },
+              { edge: 'e2_gen_ver', node: 'p2_verify', msg: 'Re-verification passed: all claims now grounded in retrieved context.' },
+              { edge: 'e2_ver_out', node: 'p2_output', msg: 'Verified Answer delivered with repair_used=True logged to SQLite.' }
+            ]
+          }
+        ]
+      },
+
+      // -----------------------------------------------------------------------
+      // PHASE 3: TOOL EXECUTION & DOCKER SANDBOXES
+      // -----------------------------------------------------------------------
+      phase3: {
+        heading: 'Phase 3 - Tool Execution & Docker Sandboxes (MicroVM Isolation)',
+        sub: 'Models prove their work against deterministic tools inside an isolated Docker Sandbox (sbx) MicroVM with scoped MCP servers.',
+        defaultNode: 'p3_gate',
+        frames: [
+          {
+            x: 280, y: 174, w: 650, h: 218,
+            stroke: '#06b6d4',
+            fill: 'rgba(6, 182, 212, 0.05)',
+            title: 'DOCKER SANDBOX (sbx MicroVM) - SECURITY BOUNDARY',
+            sub: 'Dedicated Linux Kernel | Private Docker Engine | Network Allow/Deny | Zero Host Credentials'
+          }
+        ],
+        nodes: [
+          {
+            id: 'p3_input',
+            cat: 'io',
+            x: 25, y: 46, w: 125, h: 72,
+            title: 'User Query',
+            sub: 'Action / Verify Ask',
+            tag: 'INPUT',
+            role: 'Incoming question requiring live computation, code verification, or external documentation lookup.',
+            stack: 'Python CLI / Web API',
+            failure: 'Establishes session context before handing off to the stateful orchestrator.',
+            codeLang: 'Python',
+            code: `task = AgentTask(\n    prompt="Verify this compound interest formula & check repo PR #42",\n    session_id="sess_904"\n)`
+          },
+          {
+            id: 'p3_orch',
+            cat: 'control',
+            x: 188, y: 46, w: 205, h: 72,
+            title: 'Orchestrator & Memory',
+            sub: 'Hermes Patterns + Jev',
+            tag: 'STATE & SKILLS',
+            role: 'Manages persistent session state, loads reusable SKILL.md playbooks, and uses Jev to decide whether tools are needed.',
+            stack: 'Python | Hermes-inspired Harness | SKILL.md',
+            failure: 'Prevents task drift across multi-step tool calls by anchoring state and explicit skill procedures.',
+            codeLang: 'YAML',
+            code: `# SKILL.md frontmatter - reusable tool playbook\nname: quantitative_verify\nrequires_sandbox: true\nallowed_tools: ["python_exec", "mcp_docs"]\nmax_tool_turns: 3`
+          },
+          {
+            id: 'p3_model',
+            cat: 'cloud',
+            x: 432, y: 46, w: 215, h: 72,
+            title: 'Routed Reasoning Model',
+            sub: 'Local / OpenRouter / frontier model',
+            tag: 'PLAN & TOOL CALL',
+            role: 'Plans the verification strategy and emits typed tool call payloads (Python scripts or MCP queries) instead of guessing.',
+            stack: 'OpenRouter / frontier model / Ollama',
+            failure: 'Shifts arithmetic, code execution, and factual lookups out of token prediction into deterministic runtimes.',
+            codeLang: 'Python',
+            code: `tool_call = model.propose_tool(\n    messages=state.history,\n    tools=skill.allowed_tools\n)\n# -> ToolCall(name="python_exec", args={"code": "..."})`
+          },
+          {
+            id: 'p3_gate',
+            cat: 'control',
+            x: 690, y: 46, w: 240, h: 72,
+            title: 'Tool Dispatch Gate',
+            sub: 'Host Policy & Allow-List',
+            tag: 'HOST GUARDRAIL',
+            role: 'Enforces host-side security policy before crossing the MicroVM boundary: checks tool allow-lists, strips host secrets, and sets timeouts.',
+            stack: 'Python Host Controller | Docker sbx CLI',
+            failure: 'Blocks prompt-injected tool calls from accessing unauthorized endpoints or host environment variables.',
+            codeLang: 'Python',
+            code: `if tool_call.name not in skill.allowed_tools:\n    raise PolicyDeniedError(tool_call.name)\n\n# Execute inside ephemeral MicroVM with zero host creds\nres = sbx.run(\n    sandbox_id=vm_id, cmd=tool_call.cmd, timeout=15\n)`
+          },
+          {
+            id: 'p3_py',
+            cat: 'sandbox',
+            x: 305, y: 248, w: 185, h: 88,
+            title: 'Python & Math Runner',
+            sub: 'Deterministic Compute',
+            tag: 'INSIDE MicroVM',
+            role: 'Executes LLM-generated Python scripts to verify calculations, parse data, or validate algorithmic outputs inside the isolated VM.',
+            stack: 'Python 3.11 inside Docker sbx MicroVM',
+            failure: 'Eliminates LLM arithmetic/logic hallucinations while protecting the host OS from arbitrary code execution.',
+            codeLang: 'Bash',
+            code: `# Launched via host gate inside MicroVM\nsbx exec --network=none qa-vm-01 \\\n  python3 -c "print(round(10000 * (1.065 ** 10), 2))"\n# stdout -> 18771.37`
+          },
+          {
+            id: 'p3_test',
+            cat: 'sandbox',
+            x: 512, y: 248, w: 185, h: 88,
+            title: 'Unit Test Executor',
+            sub: 'Private Docker Engine',
+            tag: 'INSIDE MicroVM',
+            role: 'Runs pytest, linters, or ephemeral containers inside the sandbox\'s private Docker daemon to prove generated code actually compiles and passes.',
+            stack: 'pytest | Private VM Docker Engine',
+            failure: 'Catches "broken code that looks perfectly fine" by forcing compilation and unit tests before answering.',
+            codeLang: 'Bash',
+            code: `# Runs against isolated repo snapshot\nsbx exec qa-vm-01 pytest -q tests/test_parser.py\n# exit_code=0 -> 12 passed in 0.41s`
+          },
+          {
+            id: 'p3_mcp',
+            cat: 'sandbox',
+            x: 720, y: 248, w: 185, h: 88,
+            title: 'Scoped MCP Servers',
+            sub: 'GitHub | Docs | Search',
+            tag: 'PER-SANDBOX MCP',
+            role: 'Exposes strictly scoped Model Context Protocol servers enabled per-sandbox with network allow-lists rather than global host access.',
+            stack: 'MCP Protocol | Network Allow/Deny Policy',
+            failure: 'Limits blast radius: a Q&A sandbox can read specific docs or GitHub PRs without touching production credentials.',
+            codeLang: 'YAML',
+            code: `# sandbox-mcp.yaml (scoped per MicroVM)\nmcp_servers:\n  local_docs: { mode: "read-only" }\n  github:     { repos: ["org/inference-arbiter"], write: false }\nnetwork_policy:\n  allow: ["api.github.com"]\n  deny:  ["*"]`
+          },
+          {
+            id: 'p3_verifier',
+            cat: 'verify',
+            x: 432, y: 462, w: 235, h: 74,
+            title: 'Evidence Verifier',
+            sub: 'Deterministic stdout Grounding',
+            tag: 'PROOF CHECK',
+            role: 'Ingests exit codes, stdout, and structured MCP results crossing back out of the MicroVM to ground the final response.',
+            stack: 'Python Exit-Code & Schema Assertions',
+            failure: 'Ensures the final answer matches actual tool output rather than the model overriding reality with a hallucinated number.',
+            codeLang: 'Python',
+            code: `assert tool_res.exit_code == 0, "Sandbox execution failed"\nevidence = EvidenceBundle(\n    stdout=tool_res.stdout,\n    mcp_refs=mcp_res.citations\n)`
+          },
+          {
+            id: 'p3_output',
+            cat: 'io',
+            x: 112, y: 462, w: 235, h: 74,
+            title: 'Final Grounded Answer',
+            sub: 'Verified + SQLite Telemetry',
+            tag: 'OUTPUT & AUDIT',
+            role: 'Returns the evidence-backed answer to the user, updates orchestrator memory, and logs full tool/cost telemetry to SQLite.',
+            stack: 'Python Output + SQLite Audit Log',
+            failure: 'Provides a complete forensic trail (exact code run, MCP source, VM teardown status) for every answer.',
+            codeLang: 'Python',
+            code: `log_sandbox_run(task.session_id, evidence, cost_usd)\nsbx.destroy(vm_id)  # Ephemeral MicroVM cleanup\nreturn synthesize_final(task.prompt, evidence)`
+          }
+        ],
+        edges: [
+          { id: 'e3_in_or', from: 'p3_input', to: 'p3_orch', d: 'M 150 82 L 188 82', color: '#94a3b8' },
+          { id: 'e3_or_mod', from: 'p3_orch', to: 'p3_model', d: 'M 393 82 L 432 82', color: '#3b82f6', label: 'skill + state', lx: 412, ly: 64 },
+          { id: 'e3_mod_gt', from: 'p3_model', to: 'p3_gate', d: 'M 647 82 L 690 82', color: '#8b5cf6', label: 'tool call', lx: 668, ly: 64 },
+          { id: 'e3_gt_py', from: 'p3_gate', to: 'p3_py', d: 'M 810 118 L 810 174 L 810 226 L 397 226 L 397 248', color: '#06b6d4', label: 'MicroVM Boundary', lx: 810, ly: 152 },
+          { id: 'e3_gt_test', from: 'p3_gate', to: 'p3_test', d: 'M 810 118 L 810 226 L 604 226 L 604 248', color: '#06b6d4' },
+          { id: 'e3_gt_mcp', from: 'p3_gate', to: 'p3_mcp', d: 'M 810 118 L 810 248', color: '#06b6d4' },
+          { id: 'e3_py_ver', from: 'p3_py', to: 'p3_verifier', d: 'M 397 336 L 397 424 L 515 424 L 515 462', color: '#06b6d4' },
+          { id: 'e3_test_ver', from: 'p3_test', to: 'p3_verifier', d: 'M 604 336 L 604 424 L 550 424 L 550 462', color: '#06b6d4', label: 'Verified stdout / JSON', lx: 604, ly: 410 },
+          { id: 'e3_mcp_ver', from: 'p3_mcp', to: 'p3_verifier', d: 'M 812 336 L 812 424 L 585 424 L 585 462', color: '#06b6d4' },
+          { id: 'e3_ver_out', from: 'p3_verifier', to: 'p3_output', d: 'M 432 499 L 347 499', color: '#10b981', label: 'Grounded', lx: 389, ly: 482 },
+          { id: 'e3_out_or', from: 'p3_output', to: 'p3_orch', d: 'M 229 462 L 229 118', color: '#64748b', dashed: true, label: 'memory & audit', lx: 175, ly: 292 }
+        ],
+        simulations: [
+          {
+            id: 'sim_p3_sandbox',
+            label: 'Simulate: Code/Math Verification in Sandbox',
+            accent: 'cyan',
+            steps: [
+              { node: 'p3_input', msg: 'Query: "Verify compound return math & cross-check rate table in local docs."' },
+              { edge: 'e3_in_or', node: 'p3_orch', msg: 'Orchestrator loaded SKILL.md (quantitative_verify) & flagged sandbox=True.' },
+              { edge: 'e3_or_mod', node: 'p3_model', msg: 'The frontier model emitted two tool calls: python_exec (math) + mcp_docs (lookup).' },
+              { edge: 'e3_mod_gt', node: 'p3_gate', msg: 'Host Dispatch Gate verified allow-list, stripped host secrets, spun up sbx MicroVM.' },
+              { edge: 'e3_gt_py', node: 'p3_py', msg: 'Inside MicroVM (--network=none): Python runner computed exact result = 18,771.37.' },
+              { edge: 'e3_gt_mcp', node: 'p3_mcp', msg: 'Scoped MCP (read-only local_docs) retrieved rate table citation v2.4.' },
+              { edge: 'e3_py_ver', node: 'p3_verifier', msg: 'Evidence Verifier confirmed exit_code=0 and matched stdout against MCP rate.' },
+              { edge: 'e3_ver_out', node: 'p3_output', msg: 'Final Grounded Answer delivered; MicroVM destroyed; telemetry saved to SQLite.' },
+              { edge: 'e3_out_or', node: 'p3_orch', msg: 'Session memory updated with verified artifact for follow-up questions.' }
+            ]
+          }
+        ]
+      }
+    };
+
+    // =========================================================================
+    // APPLICATION STATE
+    // =========================================================================
+    let currentPhaseKey = 'phase1';
+    let selectedNodeId = null;
+    let simTimer = null;
+    let simAnimFrame = null;
+    let isSimulating = false;
+    let currentRawSnippet = '';
+
+    // =========================================================================
+    // SIMPLE SYNTAX HIGHLIGHTER (Python / YAML / Bash / SQL)
+    // =========================================================================
+    function highlightCode(code) {
+      let escaped = code
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+      // Tokenize line-by-line so comments don't collide with strings/keywords
+      return escaped.split('\n').map(line => {
+        // Comments (# or --)
+        const commentIdx = line.search(/(#|--)(\s|$)/);
+        let codePart = line;
+        let commentPart = '';
+        if (commentIdx !== -1 && !line.slice(0, commentIdx).includes('http')) {
+          codePart = line.slice(0, commentIdx);
+          commentPart = `<span class="tok-cm">${line.slice(commentIdx)}</span>`;
+        }
+
+        // Strings
+        codePart = codePart.replace(/(".*?"|'.*?')/g, '<span class="tok-str">$1</span>');
+        // Keywords
+        codePart = codePart.replace(/\b(from|import|def|class|return|if|elif|else|try|except|for|in|not|and|or|raise|assert|SELECT|FROM|GROUP|BY|AS|INSERT|INTO|VALUES|AVG|SUM|ROUND)\b/g, '<span class="tok-kw">$1</span>');
+        // Numbers
+        codePart = codePart.replace(/\b(\d+(\.\d+)?)\b/g, '<span class="tok-num">$1</span>');
+        // Builtins / Class names (PascalCase)
+        codePart = codePart.replace(/\b([A-Z][A-Za-z0-9_]+)\b/g, '<span class="tok-cls">$1</span>');
+
+        return codePart + commentPart;
+      }).join('\n');
+    }
+
+    // =========================================================================
+    // SVG RENDERER
+    // =========================================================================
+    function createSvgEl(tag, attrs = {}) {
+      const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        el.setAttribute(k, v);
+      }
+      return el;
+    }
+
+    function renderPhase(phaseKey) {
+      stopSimulation(false);
+      currentPhaseKey = phaseKey;
+      const phase = PHASES[phaseKey];
+
+      // Update Tab Styles
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        const active = btn.id === `tab-${phaseKey}`;
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+        btn.className = active
+          ? 'tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all border flex items-center gap-2 bg-slate-800/90 text-white border-slate-600 shadow-sm'
+          : 'tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all border flex items-center gap-2 bg-[#0f1623]/70 text-slate-400 border-slate-800 hover:text-slate-200 hover:border-slate-700';
+      });
+
+      // Update Toolbar Heading
+      document.getElementById('phase-heading').textContent = phase.heading;
+      document.getElementById('phase-sub').textContent = phase.sub;
+
+      // Render Simulation Buttons
+      const simContainer = document.getElementById('sim-controls');
+      simContainer.innerHTML = '';
+      const accentMap = {
+        emerald: 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40',
+        violet: 'bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 border-violet-500/40',
+        amber: 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40',
+        cyan: 'bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border-cyan-500/40',
+      };
+
+      phase.simulations.forEach(sim => {
+        const btn = document.createElement('button');
+        btn.className = `px-3 py-1.5 rounded-lg text-xs font-mono font-medium border transition-all flex items-center gap-1.5 ${accentMap[sim.accent] || accentMap.emerald}`;
+        btn.innerHTML = `<svg class="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>${sim.label}`;
+        btn.onclick = () => runSimulation(sim);
+        simContainer.appendChild(btn);
+      });
+
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'px-2.5 py-1.5 rounded-lg text-xs font-mono text-slate-400 hover:text-slate-200 bg-slate-800/70 hover:bg-slate-800 border border-slate-700 transition-colors';
+      resetBtn.textContent = 'Reset';
+      resetBtn.onclick = () => stopSimulation(true);
+      simContainer.appendChild(resetBtn);
+
+      // Build SVG Diagram
+      const svg = document.getElementById('arch-svg');
+      svg.innerHTML = '';
+
+      // 1. Defs (Arrowheads for each color)
+      const defs = createSvgEl('defs');
+      const markerColors = {
+        slate: '#94a3b8',
+        muted: '#64748b',
+        blue: '#3b82f6',
+        emerald: '#10b981',
+        violet: '#8b5cf6',
+        amber: '#f59e0b',
+        cyan: '#06b6d4'
+      };
+      for (const [name, hex] of Object.entries(markerColors)) {
+        const marker = createSvgEl('marker', {
+          id: `arrow-${hex.replace('#', '')}`,
+          viewBox: '0 0 10 10',
+          refX: '8.5',
+          refY: '5',
+          markerWidth: '6.5',
+          markerHeight: '6.5',
+          orient: 'auto-start-reverse'
+        });
+        marker.appendChild(createSvgEl('path', {
+          d: 'M 0 1.2 L 9 5 L 0 8.8 z',
+          fill: hex
+        }));
+        defs.appendChild(marker);
+      }
+      svg.appendChild(defs);
+
+      // 2. Security Boundary / Eval Frames
+      const frameLayer = createSvgEl('g', { id: 'layer-frames' });
+      phase.frames.forEach(f => {
+        const g = createSvgEl('g');
+        g.appendChild(createSvgEl('rect', {
+          x: f.x, y: f.y, width: f.w, height: f.h,
+          rx: 12,
+          fill: f.fill,
+          stroke: f.stroke,
+          'stroke-width': 1.75,
+          'stroke-dasharray': '7 5'
+        }));
+
+        // Header label pill inside frame
+        const titleTxt = createSvgEl('text', {
+          x: f.x + 16, y: f.y + 24,
+          fill: f.stroke,
+          'font-family': 'JetBrains Mono, monospace',
+          'font-size': '11',
+          'font-weight': '600',
+          'letter-spacing': '0.04em'
+        });
+        titleTxt.textContent = f.title;
+        g.appendChild(titleTxt);
+
+        const subTxt = createSvgEl('text', {
+          x: f.x + 16, y: f.y + 42,
+          fill: '#94a3b8',
+          'font-family': 'Inter, sans-serif',
+          'font-size': '11'
+        });
+        subTxt.textContent = f.sub;
+        g.appendChild(subTxt);
+
+        frameLayer.appendChild(g);
+      });
+      svg.appendChild(frameLayer);
+
+      // 3. Edges Layer
+      const edgeLayer = createSvgEl('g', { id: 'layer-edges' });
+      const labelLayer = createSvgEl('g', { id: 'layer-edge-labels' });
+
+      phase.edges.forEach(e => {
+        const strokeHex = e.color || '#64748b';
+        const path = createSvgEl('path', {
+          id: `edge-${e.id}`,
+          class: 'arch-edge',
+          d: e.d,
+          fill: 'none',
+          stroke: strokeHex,
+          'stroke-width': 1.8,
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+          'marker-end': `url(#arrow-${strokeHex.replace('#', '')})`,
+          ...(e.dashed ? { 'stroke-dasharray': '5 4' } : {})
+        });
+        edgeLayer.appendChild(path);
+
+        if (e.label) {
+          const pillW = Math.max(46, e.label.length * 6.3 + 14);
+          const pillH = 18;
+          const lg = createSvgEl('g', { id: `elabel-${e.id}`, class: 'arch-edge' });
+          lg.appendChild(createSvgEl('rect', {
+            x: e.lx - pillW / 2,
+            y: e.ly - pillH / 2,
+            width: pillW,
+            height: pillH,
+            rx: 5,
+            fill: '#0b0f17',
+            stroke: strokeHex,
+            'stroke-opacity': '0.45',
+            'stroke-width': 1
+          }));
+          const txt = createSvgEl('text', {
+            x: e.lx,
+            y: e.ly + 3.5,
+            'text-anchor': 'middle',
+            fill: '#e2e8f0',
+            'font-family': 'JetBrains Mono, monospace',
+            'font-size': '9.5',
+            'font-weight': '500'
+          });
+          txt.textContent = e.label;
+          lg.appendChild(txt);
+          labelLayer.appendChild(lg);
+        }
+      });
+      svg.appendChild(edgeLayer);
+
+      // 4. Nodes Layer
+      const nodeLayer = createSvgEl('g', { id: 'layer-nodes' });
+      phase.nodes.forEach(n => {
+        const c = CATEGORIES[n.cat];
+        const g = createSvgEl('g', {
+          id: `node-${n.id}`,
+          class: 'arch-node',
+          style: `--node-glow: ${c.glow};`
+        });
+        g.addEventListener('click', () => selectNode(n.id));
+
+        // Card Background
+        g.appendChild(createSvgEl('rect', {
+          class: 'node-bg',
+          x: n.x, y: n.y, width: n.w, height: n.h,
+          rx: 10,
+          fill: c.fill,
+          stroke: c.stroke,
+          'stroke-width': 1.5
+        }));
+
+        // Left Category Accent Bar
+        g.appendChild(createSvgEl('rect', {
+          x: n.x, y: n.y + 10, width: 3.5, height: n.h - 20,
+          rx: 1.75,
+          fill: c.stroke
+        }));
+
+        // Micro Tag (top-left)
+        const tagTxt = createSvgEl('text', {
+          x: n.x + 12, y: n.y + 18,
+          fill: c.sub,
+          'font-family': 'JetBrains Mono, monospace',
+          'font-size': '9',
+          'font-weight': '600',
+          'letter-spacing': '0.05em',
+          opacity: '0.9'
+        });
+        tagTxt.textContent = n.tag;
+        g.appendChild(tagTxt);
+
+        // Node Title
+        const titleTxt = createSvgEl('text', {
+          x: n.x + 12, y: n.y + 39,
+          fill: c.text,
+          'font-family': 'Inter, sans-serif',
+          'font-size': '12.5',
+          'font-weight': '600'
+        });
+        titleTxt.textContent = n.title;
+        g.appendChild(titleTxt);
+
+        // Node Subtitle
+        const subTxt = createSvgEl('text', {
+          x: n.x + 12, y: n.y + 56,
+          fill: '#94a3b8',
+          'font-family': 'JetBrains Mono, monospace',
+          'font-size': '10'
+        });
+        subTxt.textContent = n.sub;
+        g.appendChild(subTxt);
+
+        nodeLayer.appendChild(g);
+      });
+      svg.appendChild(nodeLayer);
+      svg.appendChild(labelLayer);
+
+      // 5. Packet Animation Layer (always on top)
+      const packetLayer = createSvgEl('g', { id: 'layer-packet' });
+      svg.appendChild(packetLayer);
+
+      // Reset Trace Log
+      resetTraceLog();
+
+      // Pre-select key node for immediate Inspector utility
+      selectNode(phase.defaultNode);
+    }
+
+    // =========================================================================
+    // NODE INSPECTOR
+    // =========================================================================
+    function selectNode(nodeId) {
+      const phase = PHASES[currentPhaseKey];
+      const node = phase.nodes.find(n => n.id === nodeId);
+      if (!node) return;
+
+      selectedNodeId = nodeId;
+
+      // Update SVG selection styling
+      document.querySelectorAll('.arch-node').forEach(el => {
+        el.classList.toggle('selected', el.id === `node-${nodeId}`);
+      });
+
+      // Populate Inspector
+      const cat = CATEGORIES[node.cat];
+      const badge = document.getElementById('insp-badge');
+      badge.textContent = cat.label;
+      badge.className = `px-2 py-0.5 rounded-md text-[11px] font-mono font-medium border ${cat.badgeClass}`;
+
+      document.getElementById('insp-title').textContent = node.title;
+      document.getElementById('insp-subtitle').textContent = `${node.tag} | ${node.sub}`;
+      document.getElementById('insp-role').textContent = node.role;
+      document.getElementById('insp-stack').textContent = node.stack;
+      document.getElementById('insp-failure').textContent = node.failure;
+      document.getElementById('insp-code-label').textContent = `${node.codeLang} Snippet`;
+
+      currentRawSnippet = node.code;
+      document.getElementById('insp-code').innerHTML = highlightCode(node.code);
+
+      const copyBtn = document.getElementById('copy-btn');
+      copyBtn.textContent = 'Copy';
+    }
+
+    // Clipboard helper using execCommand for iframe compatibility
+    function copySnippet() {
+      const textarea = document.createElement('textarea');
+      textarea.value = currentRawSnippet;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        const btn = document.getElementById('copy-btn');
+        btn.textContent = 'Copied ok';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 1600);
+      } catch (err) {
+        console.error('Copy failed', err);
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
+
+    // =========================================================================
+    // FLOW SIMULATION ENGINE
+    // =========================================================================
+    function resetTraceLog() {
+      const dot = document.getElementById('trace-status-dot');
+      dot.className = 'w-2 h-2 rounded-full bg-slate-600';
+      document.getElementById('trace-meta').textContent = 'Idle - Select a simulation above';
+      document.getElementById('trace-log').innerHTML =
+        '<div class="text-slate-500">// Click a "Simulate Flow" button to animate a live request packet through this phase.</div>';
+    }
+
+    function stopSimulation(clearVisuals = true) {
+      isSimulating = false;
+      if (simTimer) {
+        clearTimeout(simTimer);
+        simTimer = null;
+      }
+      if (simAnimFrame) {
+        cancelAnimationFrame(simAnimFrame);
+        simAnimFrame = null;
+      }
+      const packetLayer = document.getElementById('layer-packet');
+      if (packetLayer) packetLayer.innerHTML = '';
+
+      if (clearVisuals) {
+        document.querySelectorAll('.arch-node').forEach(el => {
+          el.classList.remove('sim-active', 'sim-dim');
+        });
+        document.querySelectorAll('.arch-edge').forEach(el => {
+          el.classList.remove('sim-highlight', 'sim-dim');
+        });
+        resetTraceLog();
+      }
+    }
+
+    function animatePacketAlongEdge(edgeId, color, durationMs, onDone) {
+      const path = document.getElementById(`edge-${edgeId}`);
+      const packetLayer = document.getElementById('layer-packet');
+      if (!path || !packetLayer) {
+        onDone();
+        return;
+      }
+
+      const totalLen = path.getTotalLength();
+      packetLayer.innerHTML = '';
+      const dot = createSvgEl('circle', {
+        r: '5.5',
+        fill: color,
+        class: 'packet-dot',
+        style: `color: ${color};`
+      });
+      packetLayer.appendChild(dot);
+
+      const start = performance.now();
+      function tick(now) {
+        if (!isSimulating) return;
+        const t = Math.min(1, (now - start) / durationMs);
+        // Smooth ease-in-out
+        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        const pt = path.getPointAtLength(eased * totalLen);
+        dot.setAttribute('cx', pt.x);
+        dot.setAttribute('cy', pt.y);
+
+        if (t < 1) {
+          simAnimFrame = requestAnimationFrame(tick);
+        } else {
+          packetLayer.innerHTML = '';
+          onDone();
+        }
+      }
+      simAnimFrame = requestAnimationFrame(tick);
+    }
+
+    function runSimulation(sim) {
+      stopSimulation(true);
+      isSimulating = true;
+
+      const phase = PHASES[currentPhaseKey];
+      const traceLog = document.getElementById('trace-log');
+      const statusDot = document.getElementById('trace-status-dot');
+      const traceMeta = document.getElementById('trace-meta');
+
+      const accentColors = {
+        emerald: '#10b981',
+        violet: '#8b5cf6',
+        amber: '#f59e0b',
+        cyan: '#06b6d4'
+      };
+      const packetColor = accentColors[sim.accent] || '#3b82f6';
+
+      statusDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+      traceMeta.textContent = `Running: ${sim.label.replace('Simulate: ', '')}`;
+      traceLog.innerHTML = '';
+
+      // Dim all nodes & edges initially
+      document.querySelectorAll('.arch-node').forEach(el => el.classList.add('sim-dim'));
+      document.querySelectorAll('.arch-edge').forEach(el => el.classList.add('sim-dim'));
+
+      let idx = 0;
+
+      function executeStep() {
+        if (!isSimulating) return;
+        if (idx >= sim.steps.length) {
+          isSimulating = false;
+          statusDot.className = 'w-2 h-2 rounded-full bg-blue-400';
+          traceMeta.textContent = `Completed (${sim.steps.length} steps)`;
+          const doneLine = document.createElement('div');
+          doneLine.className = 'text-emerald-400 pt-1';
+          doneLine.textContent = 'ok Simulation complete. Click any highlighted node to inspect its implementation.';
+          traceLog.appendChild(doneLine);
+          traceLog.scrollTop = traceLog.scrollHeight;
+          return;
+        }
+
+        const step = sim.steps[idx];
+
+        const activateNodeAndLog = () => {
+          if (!isSimulating) return;
+          // Clear previous pulse, keep visited nodes un-dimmed
+          document.querySelectorAll('.arch-node.sim-active').forEach(el => el.classList.remove('sim-active'));
+
+          const nodeEl = document.getElementById(`node-${step.node}`);
+          if (nodeEl) {
+            nodeEl.classList.remove('sim-dim');
+            nodeEl.classList.add('sim-active');
+          }
+
+          // Sync Inspector to active node
+          selectNode(step.node);
+
+          // Append trace log entry
+          const nodeObj = phase.nodes.find(n => n.id === step.node);
+          const line = document.createElement('div');
+          line.className = 'flex items-start gap-2';
+          line.innerHTML = `<span class="text-slate-500 shrink-0">[0${idx + 1}]</span><span class="text-blue-300 shrink-0 font-semibold">${nodeObj ? nodeObj.title : step.node}:</span><span class="text-slate-200">${step.msg}</span>`;
+          traceLog.appendChild(line);
+          traceLog.scrollTop = traceLog.scrollHeight;
+
+          idx++;
+          simTimer = setTimeout(executeStep, 950);
+        };
+
+        if (step.edge) {
+          const edgeEl = document.getElementById(`edge-${step.edge}`);
+          const labelEl = document.getElementById(`elabel-${step.edge}`);
+          if (edgeEl) {
+            edgeEl.classList.remove('sim-dim');
+            edgeEl.classList.add('sim-highlight');
+          }
+          if (labelEl) {
+            labelEl.classList.remove('sim-dim');
+          }
+          animatePacketAlongEdge(step.edge, packetColor, 520, activateNodeAndLog);
+        } else {
+          activateNodeAndLog();
+        }
+      }
+
+      executeStep();
+    }
+
+    function switchTab(phaseKey) {
+      renderPhase(phaseKey);
+    }
+
+    // Initialize Phase 1 on load
+    window.addEventListener('DOMContentLoaded', () => {
+      renderPhase('phase1');
+    });
+  </script>
+</body>
+</html>

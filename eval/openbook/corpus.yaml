@@ -1,0 +1,39 @@
+# Open-book eval corpus manifest. Maintained by scripts/fetch_corpus.py (--pin rewrites it).
+# Documents with a url are third-party pages, fetched into data/corpus/ (git-ignored) and
+# never committed. Documents without a url are files in this repository.
+# sha256 is over the file bytes. The eval refuses to run when a file is missing or differs.
+version: 1
+documents:
+- id: build_plan
+  path: inference_arbiter_architecture_build_plan.md
+  sha256: cf45c276b61dc482ff1e16c2e18f7c7f7559ac162770fe749aeac37c5a2a1bff
+  pinned_utc: '2026-11-24T06:29:02+00:00'
+- id: thread_summary
+  path: inference_arbiter_thread_discussion_summary.md
+  sha256: 58b5c20777ddcfb0d7519d9c6be4e3614fc84ad427b9bb9f78e96e4ab29dfde0
+  pinned_utc: '2026-11-24T06:29:02+00:00'
+- id: jev_router
+  path: data/corpus/jev-router.md
+  url: https://openrouter.ai/docs/guides/routing/routers/jev-router.md
+  sha256: b71f892f7bbd981f54e3bed3da8636f19da28a27c5e394035e1c61d1a08f95bf
+  pinned_utc: '2026-11-22T00:17:51+00:00'
+- id: router_metadata
+  path: data/corpus/router-metadata.md
+  url: https://openrouter.ai/docs/guides/routing/routers/router-metadata.md
+  sha256: b2c09582c97dc7ec5dd867ffa50a701b0c7c6409203619b79dba6bc7c630bff5
+  pinned_utc: '2026-11-22T00:17:51+00:00'
+- id: jev_tutorial
+  path: data/corpus/jev-tutorial.md
+  url: https://openrouter.ai/docs/guides/community/jev-tutorial.md
+  sha256: 1b1e9fa6a979307a348f3daed1491d0801a86e5ff81622cfecdf86a49f2bd198
+  pinned_utc: '2026-11-22T00:17:51+00:00'
+- id: auto_router
+  path: data/corpus/auto-router.md
+  url: https://openrouter.ai/docs/guides/routing/routers/auto-router.md
+  sha256: a161b4c72a1d5028ffee54ca11c5984f038e5c9bc1bb089183badbffce43acb1
+  pinned_utc: '2026-11-22T00:17:51+00:00'
+- id: typesafe_sdk
+  path: data/corpus/typesafe-sdk.md
+  url: https://openrouter.ai/docs/guides/community/typesafe-sdk.md
+  sha256: 0e75922c7f9d5470c22f395e9346125080413d95d53777b6119c7bae83fc4759
+  pinned_utc: '2026-11-22T00:17:51+00:00'
