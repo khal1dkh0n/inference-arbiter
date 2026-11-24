@@ -7,12 +7,14 @@ import sys
 
 from pydantic import ValidationError
 
+from inference_arbiter import mcpdocs
 from inference_arbiter.config import DEFAULT_CONFIG_PATH, ConfigError
 from inference_arbiter.router import (
     DEFAULT_DB_PATH,
     ChainNotConfiguredError,
     CodeTestNotConfiguredError,
     ExecuteNotConfiguredError,
+    McpNotConfiguredError,
     OpenbookNotConfiguredError,
     UnknownTierError,
     build_harness,
@@ -124,6 +126,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ask.add_argument(
+        "--docs",
+        metavar="DIR",
+        help=(
+            "mcp mode: answer from the .md and .txt documents of this folder. They are fetched through "
+            "a read-only MCP server started for this run on the host (no sandbox), behind a gate that "
+            "allows two tools and logs every call; one model call plans which documents to read, and "
+            "the grounded pipeline answers with citations checked against what the server returned"
+        ),
+    )
+    ask.add_argument(
         "--require-citations",
         action="store_true",
         help="with --sources: always use the grounded pipeline with citations, even when the sources fit",
@@ -160,11 +172,13 @@ def build_parser() -> argparse.ArgumentParser:
             "draft-invalid",
             "quote-mismatch",
             "grounding-error",
+            "tool-refused",
         ],
         help=(
             "inject a failure to exercise the fail paths (verifier-error and draft-invalid need "
-            "--chain; quote-mismatch and grounding-error need --sources without --stuffed and "
-            "select the grounded pipeline; triage-timeout without --chain or --stuffed implies --route)"
+            "--chain; quote-mismatch and grounding-error need --docs, or --sources without --stuffed, "
+            "and select the grounded pipeline; tool-refused needs --docs and asks the tool gate for a "
+            "tool that is not on its allow-list; triage-timeout without --chain or --stuffed implies --route)"
         ),
     )
     ask.add_argument("--json", action="store_true", help="print the full run result as JSON")
@@ -268,7 +282,9 @@ def format_trace(result: RunResult) -> str:
             lines.append(f"              {' '.join(result.execution_note.split())[:600]}")
     if result.mode in ("openbook", "stuffed"):
         lines.append(f"sources       {result.sources_count}")
-    if result.mode == "openbook":
+    if result.mode == "mcp":
+        lines.extend(format_tool_calls(result))
+    if result.mode in ("openbook", "mcp") and result.retrieval_method is not None:
         retrieval_line = f"retrieval     {result.retrieval_method}, {result.passages_retrieved} passages"
         if result.retrieval_note:
             retrieval_line += f" ({result.retrieval_note})"
@@ -307,17 +323,45 @@ def format_trace(result: RunResult) -> str:
     return "\n".join(lines)
 
 
+def format_tool_calls(result: RunResult) -> list[str]:
+    """mcp mode: the documents server, the plan and one line per tool call the gate saw."""
+    stopped = {True: "yes", False: "NO", None: "not known"}[result.tool_server_stopped]
+    lines = [
+        f"documents     {result.docs_root}: {result.documents_listed} listed, {result.documents_read} read",
+        f"server        host process, no sandbox; stopped before the draft: {stopped}; "
+        f"environment: {', '.join(result.tool_server_environment) or 'none'}",
+        f"plan          {result.plan_status}" + (f" (tier {result.plan_tier})" if result.plan_tier else ""),
+    ]
+    for tool_call in result.tool_calls:
+        tool_line = (
+            f"tool {tool_call.seq:<2}       {tool_call.origin:<4} {tool_call.tool:<15} {tool_call.status:<7} "
+            f"{mcpdocs.describe_arguments(tool_call.arguments)}"
+        )
+        if tool_call.result_bytes is not None:
+            tool_line += f"  -> {tool_call.result_bytes} bytes"
+        if tool_call.error_type:
+            tool_line += f"  [{tool_call.error_type}]"
+        lines.append(tool_line)
+    return lines
+
+
 def format_citations(result: RunResult) -> str:
     """Numbered citations with their quotes, printed under an open-book answer."""
     lines = ["", "Citations:"]
     for number, citation in enumerate(result.citations, start=1):
         quote = " ".join(citation.quote.split())
-        lines.append(f'[{number}] {citation.source} ({citation.passage_id}): "{quote}"')
+        line = f'[{number}] {citation.source} ({citation.passage_id}): "{quote}"'
+        if citation.tool_call_seqs:
+            seqs = ", ".join(str(seq) for seq in citation.tool_call_seqs)
+            line += f" [tool calls {seqs}; sha256 {(citation.document_sha256 or '')[:12]}]"
+        lines.append(line)
     return "\n".join(lines)
 
 
 def _mode_from_arguments(arguments: argparse.Namespace) -> str:
     """Explicit flags win; anything else is auto."""
+    if arguments.docs:
+        return "mcp"
     if arguments.code_test or arguments.tests_tier:
         return "codetest"
     if arguments.execute or arguments.cross_check or arguments.cross_check_tier:
@@ -376,6 +420,17 @@ def run_ask(arguments: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if arguments.docs and (
+        arguments.sources or arguments.stuffed or arguments.chain or arguments.route or arguments.execute
+        or arguments.cross_check or arguments.cross_check_tier or arguments.code_test or arguments.tests_tier
+        or arguments.triage_tier or arguments.require_citations
+    ):
+        print(
+            "error: --docs cannot be combined with --sources, --require-citations, --stuffed, --chain, "
+            "--route, --execute, --cross-check, --code-test or --triage-tier",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if arguments.computation_check and arguments.no_computation_check:
         print("error: --computation-check and --no-computation-check cannot be combined", file=sys.stderr)
         return EXIT_USAGE
@@ -400,6 +455,7 @@ def run_ask(arguments: argparse.Namespace) -> int:
             cross_check_tier=arguments.cross_check_tier,
             computation_check=_computation_check_from_arguments(arguments),
             tests_tier=arguments.tests_tier,
+            docs_root=arguments.docs,
         )
         result = harness.answer(request)
     except (
@@ -409,6 +465,7 @@ def run_ask(arguments: argparse.Namespace) -> int:
         OpenbookNotConfiguredError,
         ExecuteNotConfiguredError,
         CodeTestNotConfiguredError,
+        McpNotConfiguredError,
     ) as usage_error:
         print(f"error: {usage_error}", file=sys.stderr)
         return EXIT_USAGE

@@ -30,6 +30,10 @@ Open-book suite (--suite openbook, eval/openbook/questions.yaml over eval/openbo
     stuffed:<tier>  one call to the forced tier with every source document pasted before the
                     question (mode stuffed; built here when the harness has no such mode yet).
     closed:<tier>   one call to the forced tier with no sources: what memory alone gets.
+    mcp             mcp mode: the case's documents are copied into a temporary folder, served
+                    from there by the read-only documents server behind the tool gate, and
+                    answered by the same grounded pipeline as `openbook`. One extra model
+                    call per case plans which documents to read. Not in the default list.
 The open-book suite does not run unless every corpus file matches the manifest hash
 (scripts/fetch_corpus.py fetches and checks them).
 
@@ -46,8 +50,10 @@ import argparse
 import hashlib
 import json
 import math
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -99,6 +105,7 @@ KIND_CHAIN = "chain"
 KIND_OPENBOOK = "openbook"
 KIND_STUFFED = "stuffed"
 KIND_CLOSED = "closed"
+KIND_MCP = "mcp"
 # execute:<tier>: the tier writes a program, a sandbox runs it, code compares (execute mode).
 KIND_EXECUTE = "execute"
 # crosscheck:<tier A>+<tier B>: execute mode with two independently written programs, A by
@@ -139,7 +146,7 @@ SUITE_KINDS = {
         KIND_TIER, KIND_ROUTER, KIND_CHAIN, KIND_EXECUTE, KIND_CROSSCHECK, KIND_AUTO, KIND_AUTO_CHECK,
         KIND_CODETEST,
     ),
-    SUITE_OPENBOOK: (KIND_OPENBOOK, KIND_STUFFED, KIND_CLOSED),
+    SUITE_OPENBOOK: (KIND_OPENBOOK, KIND_STUFFED, KIND_CLOSED, KIND_MCP),
 }
 SUITE_DEFAULT_STRATEGIES = {
     SUITE_CLOSEDBOOK: ["tier:local", "tier:mid", "router"],
@@ -150,6 +157,9 @@ FORCED_TIER_KINDS = (KIND_TIER, KIND_STUFFED, KIND_CLOSED, KIND_EXECUTE, KIND_CR
 
 MODE_OPENBOOK = "openbook"
 MODE_STUFFED = "stuffed"
+MODE_MCP = "mcp"
+# Strategies whose answers carry citations that are graded.
+CITING_KINDS = (KIND_OPENBOOK, KIND_MCP)
 STUFFED_BY_HARNESS = "harness"
 STUFFED_BY_RUNNER = "runner"
 # Used only while the harness has no stuffed mode of its own: the runner pastes the sources.
@@ -215,6 +225,8 @@ def parse_strategy(text: str) -> Strategy:
         return Strategy(name=text, kind=KIND_CHAIN)
     if text == KIND_OPENBOOK:
         return Strategy(name=text, kind=KIND_OPENBOOK)
+    if text == KIND_MCP:
+        return Strategy(name=text, kind=KIND_MCP)
     if text in (KIND_AUTO, KIND_AUTO_CHECK):
         return Strategy(name=text, kind=text)
     crosscheck_prefix = f"{KIND_CROSSCHECK}:"
@@ -239,7 +251,7 @@ def parse_strategy(text: str) -> Strategy:
         f"unknown strategy '{text}'; use tier:<name>, router, chain, execute:<tier>, "
         "crosscheck:<tier A>+<tier B>, codetest:<solution tier>+<tests tier>, auto or auto:check "
         "(closed-book suite) or "
-        "openbook, stuffed:<tier> or closed:<tier> (open-book suite)"
+        "openbook, mcp, stuffed:<tier> or closed:<tier> (open-book suite)"
     )
 
 
@@ -362,6 +374,10 @@ def unsupported_reason(strategy: Strategy) -> str | None:
             "AskRequest does not accept mode 'openbook' with sources yet; the grounded pipeline "
             "is not available in this checkout"
         )
+    if strategy.kind == KIND_MCP and (
+        not harness_mode_supported(MODE_MCP) or "docs_root" not in AskRequest.model_fields
+    ):
+        return "AskRequest does not accept mode 'mcp' with a docs_root yet; mcp mode is not available in this checkout"
     return None
 
 
@@ -373,18 +389,43 @@ def build_stuffed_prompt(question: str, documents: dict[str, dict[str, Any]]) ->
     return STUFFED_PROMPT_HEADER + "\n\n" + "\n\n".join(blocks) + f"\n\nQuestion: {question}"
 
 
+def stage_documents(documents: dict[str, dict[str, Any]], folder: str | Path) -> list[str]:
+    """Copy a case's documents into `folder` under their own file names. Returns the names.
+
+    The documents server serves one folder, and a case is asked of its own documents only,
+    so each case gets a folder holding exactly those. Copies, never links: the server does
+    not follow links. Two documents with one file name cannot be staged side by side.
+    """
+    staged_names: list[str] = []
+    for document_id, document in documents.items():
+        source_path = Path(document["path"])
+        if source_path.name in staged_names:
+            raise QuestionSetError(
+                f"document '{document_id}': another document of the case is also named {source_path.name}"
+            )
+        shutil.copyfile(source_path, Path(folder) / source_path.name)
+        staged_names.append(source_path.name)
+    return staged_names
+
+
 def build_openbook_request(
     strategy: Strategy,
     case: dict[str, Any],
     documents: dict[str, dict[str, Any]],
     verifier_tier: str | None = None,
+    docs_root: str | None = None,
 ) -> tuple[Any, str | None]:
     """The request for one open-book suite strategy. Returns (request, who pasted the sources).
 
-    verifier_tier applies to the openbook strategy only: it replaces the configured
-    grounding verifier.
+    verifier_tier applies to the openbook and mcp strategies only: it replaces the
+    configured grounding verifier. docs_root is the staged folder of the mcp strategy.
     """
     source_paths = [document["path"] for document in documents.values()]
+    if strategy.kind == KIND_MCP:
+        overrides = {"mode": MODE_MCP, "docs_root": docs_root}
+        if verifier_tier is not None:
+            overrides["verifier_tier"] = verifier_tier
+        return AskRequest.from_question(case["question"], **overrides), None
     if strategy.kind == KIND_OPENBOOK:
         overrides: dict[str, Any] = {"mode": MODE_OPENBOOK, "sources": source_paths}
         if verifier_tier is not None:
@@ -878,9 +919,17 @@ def run_openbook_case(
 
     started_at = time.monotonic()
     try:
-        request, stuffed_by = build_openbook_request(strategy, case, documents, verifier_tier)
+        if strategy.kind == KIND_MCP:
+            with tempfile.TemporaryDirectory(prefix="inference-arbiter-docs-") as staged_folder:
+                stage_documents(documents, staged_folder)
+                request, stuffed_by = build_openbook_request(
+                    strategy, case, documents, verifier_tier, docs_root=staged_folder
+                )
+                result = harness.answer(request)
+        else:
+            request, stuffed_by = build_openbook_request(strategy, case, documents, verifier_tier)
+            result = harness.answer(request)
         record["stuffed_by"] = stuffed_by
-        result = harness.answer(request)
     except Exception as harness_error:  # the eval must survive one broken run
         record["error_type"] = "exception"
         record["error_message"] = repr(harness_error)[:300]
@@ -894,6 +943,17 @@ def run_openbook_case(
         grounding_status=getattr(result, "grounding_status", None),
         passages_retrieved=getattr(result, "passages_retrieved", None),
     )
+    if strategy.kind == KIND_MCP:
+        tool_calls = list(getattr(result, "tool_calls", None) or [])
+        record.update(
+            plan_status=getattr(result, "plan_status", None),
+            documents_listed=getattr(result, "documents_listed", None),
+            documents_read=getattr(result, "documents_read", None),
+            tool_calls_total=len(tool_calls),
+            tool_calls_refused=sum(1 for call in tool_calls if getattr(call, "status", None) == "refused"),
+            tool_calls_from_plan=sum(1 for call in tool_calls if getattr(call, "origin", None) == "plan"),
+            tool_server_stopped=getattr(result, "tool_server_stopped", None),
+        )
     if excluded_as_fallback(record, strategy, result):
         return record
 
@@ -925,7 +985,7 @@ def apply_openbook_grade(
         citations=record.get("citations"),
         documents=documents,
         judge=judge,
-        citations_expected=record["strategy"] == KIND_OPENBOOK,
+        citations_expected=record["strategy"] in CITING_KINDS,
     )
     deciding = grade.answer if record["answerable"] else grade.abstention
     judge_grades = [item for item in (grade.answer, grade.abstention) if item.judge_model is not None]

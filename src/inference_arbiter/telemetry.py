@@ -1,7 +1,8 @@
 """SQLite telemetry for the inference arbiter.
 
-One row per run in `runs`, one row per model call in `calls`, and one row per program
-run in a sandbox in `sandbox_runs` (the audit log of execute mode). Standard
+One row per run in `runs`, one row per model call in `calls`, one row per program
+run in a sandbox in `sandbox_runs` (the audit log of execute mode) and one row per tool
+call in `tool_calls` (the audit log of mcp mode). Standard
 library only; this module must not import anything else from inference_arbiter.
 
 Secrets, API keys and HTTP headers are never stored: the schema has no
@@ -33,15 +34,18 @@ from pathlib import Path
 # Codetest mode added no column and no version: its statuses (tests_passed, tests_failed,
 # untested) are values of `runs.execution_status`, its calls have the roles `interface` and
 # `tests`, and its sandbox runs are `sandbox_runs` rows.
+# Version 9 adds mcp mode: the audit table `tool_calls` (one row per tool call the gate
+# saw, sent or refused) and `runs.plan_status`, `runs.tool_server_stopped`,
+# `runs.tool_server_environment`. A tool result is stored as its size and SHA-256 only.
 # Older databases are migrated in place when opened: columns are added with defaults,
 # so rows written by an earlier version stay readable.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass
 class CallRecord:
     seq: int
-    role: str  # triage | answer | draft | verify | repair | embed | ground | escalate
+    role: str  # triage | answer | draft | verify | repair | embed | ground | escalate | plan | ...
     tier: str
     provider: str
     model: str
@@ -101,6 +105,26 @@ class SandboxRunRecord:
 
 
 @dataclass
+class ToolCallRecord:
+    """One tool call in mcp mode, sent to the documents server or refused by the gate.
+
+    The arguments are stored in full (cut to the gate's argument cap when a call was
+    refused for being over it). The result text is never stored: only its size and hash."""
+
+    seq: int
+    origin: str  # code: the harness asked for it | plan: a model wrote it in its tool plan
+    tool: str
+    arguments: str  # JSON
+    arguments_truncated: bool
+    status: str  # 'ok' | 'refused' | 'error'
+    error_type: str | None  # tool_not_allowed | unknown_document | tool_error | mcp_timeout | ...
+    result_bytes: int | None  # NULL when the server was not contacted or did not answer
+    result_sha256: str | None
+    is_error: bool  # the server itself marked the result as an error
+    duration_ms: float
+
+
+@dataclass
 class RunRecord:
     trace_id: str
     ts_utc: str  # ISO 8601
@@ -122,7 +146,7 @@ class RunRecord:
     total_latency_ms: float
     total_cost_usd: float | None
     # Added in schema version 2. Defaults describe a route-mode run.
-    mode: str = "route"  # route | chain | openbook | stuffed | execute
+    mode: str = "route"  # route | chain | openbook | stuffed | execute | codetest | mcp
     verification_status: str = "skipped"  # supported | unsupported | uncertain | unavailable | skipped
     verification_critique: str | None = None
     repaired: bool = False
@@ -156,6 +180,12 @@ class RunRecord:
     cross_check_tier: str | None = None  # the tier that wrote program B
     executed_answer_b: str | None = None  # program B's output; NULL when it did not run cleanly
     cross_check_rule: str | None = None  # integer | hex | decimal | number_list | string
+    # Added in schema version 9. NULL outside mcp mode.
+    # ok | partial | over_cap | all_refused | empty | no_read | invalid | call_failed | not_run
+    plan_status: str | None = None
+    # Whether the documents server was gone when its session closed. NULL: not known, or not started.
+    tool_server_stopped: bool | None = None
+    tool_server_environment: str | None = None  # JSON list of the variable names the server was given
 
 
 # Columns added to `runs` after version 1, as (name, column definition). Used both in
@@ -200,6 +230,12 @@ _RUN_COLUMNS_ADDED_IN_V8 = (
     ("cross_check_tier", "TEXT"),
     ("executed_answer_b", "TEXT"),
     ("cross_check_rule", "TEXT"),
+)
+
+_RUN_COLUMNS_ADDED_IN_V9 = (
+    ("plan_status", "TEXT"),
+    ("tool_server_stopped", "INTEGER"),
+    ("tool_server_environment", "TEXT"),
 )
 
 _SANDBOX_RUN_COLUMNS_ADDED_IN_V8 = (("program_label", "TEXT NOT NULL DEFAULT 'a'"),)
@@ -294,6 +330,26 @@ _SCHEMA_STATEMENTS = (
         outcome TEXT NOT NULL
     )
     """,  # program_label (version 8) is added by _migrate, for new and old databases alike
+    # Added in schema version 9. As with sandbox_runs, CREATE TABLE IF NOT EXISTS is the
+    # migration: a version 8 database gets the table the first time it is opened.
+    """
+    CREATE TABLE IF NOT EXISTS tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trace_id TEXT NOT NULL REFERENCES runs(trace_id),
+        seq INTEGER NOT NULL,
+        origin TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        arguments TEXT NOT NULL,
+        arguments_truncated INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        error_type TEXT,
+        result_bytes INTEGER,
+        result_sha256 TEXT,
+        is_error INTEGER NOT NULL,
+        duration_ms REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tool_calls_trace_id ON tool_calls(trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_sandbox_runs_trace_id ON sandbox_runs(trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_runs_ts_utc ON runs(ts_utc)",
     "CREATE INDEX IF NOT EXISTS idx_calls_trace_id ON calls(trace_id)",
@@ -303,6 +359,8 @@ _RUN_COLUMNS = tuple(field.name for field in fields(RunRecord))
 _CALL_COLUMNS = ("trace_id",) + tuple(field.name for field in fields(CallRecord))
 _SANDBOX_RUN_COLUMNS = ("trace_id",) + tuple(field.name for field in fields(SandboxRunRecord))
 _SANDBOX_RUN_FLAGS = ("stdout_truncated", "stderr_truncated", "timed_out", "sandbox_removed")
+_TOOL_CALL_COLUMNS = ("trace_id",) + tuple(field.name for field in fields(ToolCallRecord))
+_TOOL_CALL_FLAGS = ("arguments_truncated", "is_error")
 
 
 def _insert_statement(table: str, columns: tuple[str, ...]) -> str:
@@ -313,6 +371,7 @@ def _insert_statement(table: str, columns: tuple[str, ...]) -> str:
 _INSERT_RUN = _insert_statement("runs", _RUN_COLUMNS)
 _INSERT_CALL = _insert_statement("calls", _CALL_COLUMNS)
 _INSERT_SANDBOX_RUN = _insert_statement("sandbox_runs", _SANDBOX_RUN_COLUMNS)
+_INSERT_TOOL_CALL = _insert_statement("tool_calls", _TOOL_CALL_COLUMNS)
 
 
 def _warn(message: str) -> None:
@@ -331,7 +390,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         + _RUN_COLUMNS_ADDED_IN_V5
         + _RUN_COLUMNS_ADDED_IN_V6
         + _RUN_COLUMNS_ADDED_IN_V7
-        + _RUN_COLUMNS_ADDED_IN_V8,
+        + _RUN_COLUMNS_ADDED_IN_V8
+        + _RUN_COLUMNS_ADDED_IN_V9,
         "calls": _CALL_COLUMNS_ADDED_IN_V4,
         "sandbox_runs": _SANDBOX_RUN_COLUMNS_ADDED_IN_V8,
     }
@@ -387,8 +447,9 @@ class Telemetry:
         run: RunRecord,
         calls: list[CallRecord],
         sandbox_runs: list[SandboxRunRecord] | None = None,
+        tool_calls: list[ToolCallRecord] | None = None,
     ) -> None:
-        """Write the run row, its call rows and its sandbox audit rows in one transaction."""
+        """Write the run row, its call rows and its audit rows in one transaction."""
         try:
             if self._conn is None:
                 raise RuntimeError("database is not open")
@@ -398,6 +459,8 @@ class Telemetry:
             run_row["schema_escalated"] = int(bool(run.schema_escalated))
             run_row["abstained"] = int(bool(run.abstained))
             run_row["cross_check"] = int(bool(run.cross_check))
+            if run.tool_server_stopped is not None:
+                run_row["tool_server_stopped"] = int(bool(run.tool_server_stopped))
             call_rows = []
             for call in calls:
                 call_row = asdict(call)
@@ -410,6 +473,13 @@ class Telemetry:
                 for flag in _SANDBOX_RUN_FLAGS:
                     sandbox_row[flag] = int(bool(sandbox_row[flag]))
                 sandbox_rows.append(sandbox_row)
+            tool_call_rows = []
+            for tool_call in tool_calls or []:
+                tool_call_row = asdict(tool_call)
+                tool_call_row["trace_id"] = run.trace_id
+                for flag in _TOOL_CALL_FLAGS:
+                    tool_call_row[flag] = int(bool(tool_call_row[flag]))
+                tool_call_rows.append(tool_call_row)
             with self._lock:
                 # The connection context manager commits on success and rolls
                 # back on any exception, so a run never lands without its calls.
@@ -417,6 +487,7 @@ class Telemetry:
                     self._conn.execute(_INSERT_RUN, run_row)
                     self._conn.executemany(_INSERT_CALL, call_rows)
                     self._conn.executemany(_INSERT_SANDBOX_RUN, sandbox_rows)
+                    self._conn.executemany(_INSERT_TOOL_CALL, tool_call_rows)
         except Exception as error:
             trace_id = getattr(run, "trace_id", "unknown")
             _warn(

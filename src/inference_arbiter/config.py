@@ -237,6 +237,40 @@ class CodeTestConfig(BaseModel):
     max_program_bytes: int = Field(default=60_000, gt=0)
 
 
+class McpDocsConfig(BaseModel):
+    """mcp mode: documents of one local folder, fetched through a read-only MCP server.
+
+    The answering tiers, the grounding verifier and the retrieval settings are those of
+    the `openbook:` block; this block needs it. Everything here is about the server, the
+    gate in front of it and the one planning call.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Answer tier that writes the tool plan from the question and the document names.
+    plan_tier: str = "mid"
+    # Planned calls past this number are refused. The plan schema itself stops at 64.
+    max_planned_calls: int = Field(default=16, gt=0, le=64)
+    # Gate: calls sent to the server in one run, planned and not.
+    max_calls: int = Field(default=64, gt=0)
+    max_argument_bytes: int = Field(default=2_000, gt=0)
+    max_result_bytes: int = Field(default=200_000, gt=0)
+    max_total_result_bytes: int = Field(default=12_000_000, gt=0)
+    call_timeout_s: float = Field(default=10, gt=0)
+    start_timeout_s: float = Field(default=20, gt=0)
+    # Server: what it indexes and how much one read returns.
+    max_documents: int = Field(default=64, gt=0)
+    max_document_bytes: int = Field(default=2_000_000, gt=0)
+    max_total_bytes: int = Field(default=8_000_000, gt=0)
+    # Document names are shown to the planning model: their length and count are capped.
+    max_name_chars: int = Field(default=120, gt=0, le=200)
+    max_lines_per_read: int = Field(default=400, gt=0)
+    max_read_bytes: int = Field(default=64_000, gt=0)
+    # The server ends itself after this long, whatever the harness does. It must outlast
+    # the planning call, which is made while the server is alive.
+    max_lifetime_s: float = Field(default=300, gt=0)
+
+
 class HarnessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -259,6 +293,8 @@ class HarnessConfig(BaseModel):
     execute: ExecuteConfig | None = None
     # Optional. Without it codetest mode is not available. Needs the execute block.
     code_test: CodeTestConfig | None = None
+    # Optional. Without it mcp mode is not available. Needs the openbook block.
+    mcp_docs: McpDocsConfig | None = None
 
     # Set by load_config; not part of the YAML.
     sha256: str = ""
@@ -363,6 +399,15 @@ class HarnessConfig(BaseModel):
                 tier_name = getattr(self.code_test, key)
                 if tier_name not in answer_tiers:
                     raise ValueError(f"code_test.{key} '{tier_name}' is not an answer tier")
+        if self.mcp_docs is not None:
+            if self.openbook is None:
+                raise ValueError(
+                    "mcp_docs needs an `openbook:` block in the config: it describes the grounded pipeline"
+                )
+            if self.mcp_docs.plan_tier not in answer_tiers:
+                raise ValueError(f"mcp_docs.plan_tier '{self.mcp_docs.plan_tier}' is not an answer tier")
+            if self.mcp_docs.max_result_bytes < self.mcp_docs.max_read_bytes:
+                raise ValueError("mcp_docs.max_result_bytes must not be below mcp_docs.max_read_bytes")
         return self
 
     def auto_closed_book_tier(self) -> str:

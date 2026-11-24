@@ -331,11 +331,13 @@ def test_repo_manifest_lists_only_ignored_paths_for_fetched_documents():
 class FakeAskRequest:
     """Stands in for AskRequest so the tests do not depend on which modes the harness has."""
 
-    model_fields = {"mode": None, "sources": None}
+    model_fields = {"mode": None, "sources": None, "docs_root": None}
 
     @classmethod
     def from_question(cls, question, **overrides):
         extra = {"verifier_tier": overrides["verifier_tier"]} if "verifier_tier" in overrides else {}
+        if "docs_root" in overrides:
+            extra["docs_root"] = overrides["docs_root"]
         return SimpleNamespace(question=question, tier=overrides.get("tier"), mode=overrides.get("mode", "route"),
                                sources=overrides.get("sources"), **extra)
 
@@ -847,3 +849,124 @@ def test_main_runs_the_open_book_suite_and_writes_no_measured_routes(tmp_path, c
     assert {row["strategy"] for row in written["records"]} == {"closed:mid", "stuffed:mid"}
     assert "Open-book scorecard" in printed
     assert routes_path.read_text(encoding="utf-8") == "EXISTING ROUTES"
+
+
+# ---- the mcp strategy: the case's documents staged into a folder of their own ----
+
+
+def test_parse_the_mcp_strategy():
+    assert strategy("mcp") == run_eval.Strategy("mcp", "mcp", None)
+    assert "mcp" in run_eval.SUITE_KINDS[run_eval.SUITE_OPENBOOK]
+    assert "mcp" not in run_eval.SUITE_DEFAULT_STRATEGIES[run_eval.SUITE_OPENBOOK]
+    with pytest.raises(ValueError):
+        run_eval.parse_strategy("mcp:mid")
+
+
+def test_stage_documents_copies_exactly_the_case_documents(corpus, tmp_path):
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    names = run_eval.stage_documents(run_eval.case_documents(CASES[1], corpus), staged)
+    assert names == ["guide.md", "notes.md"]
+    assert sorted(path.name for path in staged.iterdir()) == ["guide.md", "notes.md"]
+    assert (staged / "guide.md").read_text(encoding="utf-8") == GUIDE_TEXT
+    assert not any(path.is_symlink() for path in staged.iterdir())
+
+
+def test_stage_documents_refuses_two_documents_with_one_file_name(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    for folder in ("a", "b"):
+        (tmp_path / folder / "same.md").write_text(folder, encoding="utf-8")
+    documents = {"one": {"path": str(tmp_path / "a" / "same.md")}, "two": {"path": str(tmp_path / "b" / "same.md")}}
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    with pytest.raises(run_eval.QuestionSetError, match="same.md"):
+        run_eval.stage_documents(documents, staged)
+
+
+def test_mcp_case_is_asked_of_a_staged_folder_that_is_gone_afterwards(corpus, modes):
+    modes("openbook", "stuffed", "mcp")
+    seen = {}
+
+    def responder(request):
+        folder = run_eval.Path(request.docs_root)
+        seen["folder"] = folder
+        seen["files"] = {path.name: path.read_text(encoding="utf-8") for path in folder.iterdir()}
+        return fake_result(
+            "65536",
+            citations=[{"source": "guide.md", "passage_id": "S1-P1", "quote": EVIDENCE_QUOTE}],
+            grounding_status="grounded", abstained=False, passages_retrieved=1, mode="mcp",
+            plan_status="partial", documents_listed=1, documents_read=1, tool_server_stopped=True,
+            tool_calls=[
+                SimpleNamespace(origin="code", status="ok"),
+                SimpleNamespace(origin="plan", status="refused"),
+                SimpleNamespace(origin="plan", status="ok"),
+            ],
+        )
+
+    record, harness = run_one(CASES[0], corpus, responder, strategy_text="mcp")
+
+    request = harness.requests[0]
+    assert (request.mode, request.sources, request.tier) == ("mcp", None, None)
+    assert seen["files"] == {"guide.md": GUIDE_TEXT}
+    assert not seen["folder"].exists()
+    assert record["outcome"] == "pass"
+    assert (record["citation_validity"], record["evidence_hit"]) == ("pass", "pass")
+    assert (record["plan_status"], record["documents_listed"], record["documents_read"]) == ("partial", 1, 1)
+    assert (record["tool_calls_total"], record["tool_calls_refused"], record["tool_calls_from_plan"]) == (3, 1, 2)
+    assert record["tool_server_stopped"] is True and record["stuffed_by"] is None
+
+
+def test_mcp_answer_without_a_citation_fails_citation_validity(corpus, modes):
+    modes("mcp")
+    record, _ = run_one(
+        CASES[0], corpus, lambda request: fake_result("65536", citations=[], abstained=False, mode="mcp"),
+        strategy_text="mcp",
+    )
+    assert record["outcome"] == "pass" and record["citation_validity"] == "fail"
+
+
+def test_mcp_verifier_tier_is_passed_on(corpus, modes):
+    modes("mcp")
+    request, stuffed_by = run_eval.build_openbook_request(
+        strategy("mcp"), CASES[0], run_eval.case_documents(CASES[0], corpus), "ground_chat", docs_root="/staged"
+    )
+    assert (request.mode, request.docs_root, request.verifier_tier, stuffed_by) == ("mcp", "/staged", "ground_chat", None)
+
+
+def test_mcp_reported_not_runnable_until_the_harness_accepts_the_mode(corpus, modes):
+    modes("openbook")
+    harness = FakeHarness(lambda request: fake_result("65536"))
+    run = run_eval.run_strategies(
+        CASES, [strategy("mcp"), strategy("closed:mid")], lambda _: harness, FakeJudge(),
+        case_runner=lambda *arguments: run_eval.run_openbook_case(*arguments, corpus),
+    )
+    assert "mode 'mcp'" in run["not_runnable"]["mcp"]
+    assert {row["strategy"] for row in run["records"]} == {"closed:mid"}
+
+
+def test_mcp_strategy_runs_through_the_real_harness_gate_and_grader(corpus, tmp_path):
+    """The whole path with only the models and the transport faked: staging, the server's
+    index code, the gate, the plan, the grounded pipeline and the four grades."""
+    from conftest import HarnessKit, make_mcp_config, ok_result
+
+    kit = HarnessKit(make_mcp_config(tmp_path / "cache"))
+    read_guide = {"tool": "read_document", "arguments": {"path": "guide.md", "start_line": 1, "max_lines": 400}}
+    read_other = {"tool": "read_document", "arguments": {"path": "notes.md", "start_line": 1, "max_lines": 400}}
+    draft = {
+        "working": "", "answerable": True, "answer": "65536",
+        "claims": [{"text": "A list holds 65,536 characters.", "passage_id": "S1-P1", "quote": EVIDENCE_QUOTE}],
+    }
+    report = {"claims": [{"claim_number": 1, "reason": "stated", "verdict": "supported"}], "answerable": "yes"}
+    kit.client.script("mid-model", ok_result(json.dumps({"calls": [read_other, read_guide]})), ok_result(json.dumps(draft)))
+    kit.client.script("ground-model", ok_result(json.dumps(report)))
+
+    record = run_eval.run_openbook_case(kit.harness, strategy("mcp"), CASES[0], FakeJudge(), corpus)
+
+    assert record["outcome"] == "pass" and record["mode"] == "mcp"
+    assert (record["answer_grade"], record["citation_validity"], record["evidence_hit"]) == ("pass", "pass", "pass")
+    assert record["citations"][0]["source"] == "guide.md"
+    # notes.md is not one of this case's sources, so it was never staged: the gate refused it.
+    assert (record["plan_status"], record["tool_calls_refused"], record["documents_read"]) == ("partial", 1, 1)
+    assert [row.error_type for row in kit.tool_call_records if row.status == "refused"] == ["unknown_document"]
+    assert not run_eval.Path(kit.tool_sessions.last.root).exists()

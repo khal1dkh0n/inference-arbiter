@@ -27,14 +27,18 @@ Simulation = Literal[
     "draft-invalid",
     "quote-mismatch",
     "grounding-error",
+    "tool-refused",
 ]
 CHAIN_ONLY_SIMULATIONS = ("verifier-error", "draft-invalid")
 OPENBOOK_ONLY_SIMULATIONS = ("quote-mismatch", "grounding-error")
+# The grounded pipeline also runs inside mcp mode, so its simulations apply there too.
+GROUNDED_MODES = ("openbook", "mcp")
+MCP_ONLY_SIMULATIONS = ("tool-refused",)
 CostSource = Literal["provider_reported", "estimated", "local_zero"]
-Mode = Literal["auto", "route", "chain", "openbook", "stuffed", "execute", "codetest"]
+Mode = Literal["auto", "route", "chain", "openbook", "stuffed", "execute", "codetest", "mcp"]
 SOURCE_MODES = ("openbook", "stuffed")
 # What a finished run reports: auto is always resolved to one of the others.
-EffectiveMode = Literal["route", "chain", "openbook", "stuffed", "execute", "codetest"]
+EffectiveMode = Literal["route", "chain", "openbook", "stuffed", "execute", "codetest", "mcp"]
 VerificationStatus = Literal["supported", "unsupported", "uncertain", "unavailable", "skipped"]
 GroundingStatus = Literal["grounded", "partly_grounded", "ungrounded", "unavailable", "skipped"]
 # execute mode, one program. claim_matched: the program ran cleanly and its output agrees
@@ -64,7 +68,17 @@ ExecutionStatus = Literal[
 ]
 CallRole = Literal[
     "triage", "answer", "draft", "verify", "repair", "embed", "ground", "escalate", "draft_b", "repair_b",
-    "check", "interface", "tests",
+    "check", "interface", "tests", "plan",
+]
+# mcp mode's tool plan (mcpdocs.decide_plan). ok: every planned call was allowed. partial:
+# some were refused, the allowed ones ran. over_cap: the plan held more calls than
+# mcp_docs.max_planned_calls; the calls past the cap were refused. all_refused: the gate
+# refused every planned call and the run ended there. empty: the plan held no call.
+# no_read: it held no allowed read. invalid: the planning model's output failed the schema.
+# call_failed: the planning call itself failed. In the last four cases every listed
+# document was read instead. not_run: the run ended before the plan call.
+PlanStatus = Literal[
+    "ok", "partial", "over_cap", "all_refused", "empty", "no_read", "invalid", "call_failed", "not_run",
 ]
 # Auto mode's computation check (computation_check.py). not_run: the check was off, the
 # request had sources or the caller picked the mode or the tier. yes: the check said a short
@@ -75,6 +89,8 @@ ComputationVerdict = Literal["not_run", "yes", "no", "low_confidence", "failed"]
 
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
+
+PLAN_SCHEMA_MAX_CALLS = 64
 
 ERROR_SIMULATED_TIMEOUT = "simulated_timeout"
 ERROR_SIMULATED_ERROR = "simulated_error"
@@ -110,6 +126,9 @@ class AskRequest(BaseModel):
     # unittest tests from the question and the interface alone; both run in one isolated
     # sandbox and the answer says whether the solution passed its generated tests
     # (see codetest.py).
+    # mcp: the documents of one local folder are fetched through a read-only MCP server
+    # behind the tool gate, one model call plans which to read, and the grounded pipeline
+    # of openbook mode answers from them with citations (see mcpdocs.py). Never picked by auto.
     mode: Mode = "auto"
     # chain: verify with this verifier tier instead of chain.verifier_tier.
     # openbook: ground with this verifier tier instead of openbook.grounding_verifier_tier.
@@ -134,6 +153,8 @@ class AskRequest(BaseModel):
     computation_check: bool | None = None
     # codetest only: the tier that writes the tests. None: code_test.tests_tier.
     tests_tier: str | None = None
+    # mcp only, and required there: the folder the documents server serves for this run.
+    docs_root: str | None = None
 
     @model_validator(mode="after")
     def _options_match_the_mode(self) -> "AskRequest":
@@ -163,11 +184,19 @@ class AskRequest(BaseModel):
             self.mode != "auto" or self.sources or self.tier is not None
         ):
             raise ValueError("computation_check needs mode 'auto' without sources and without a forced tier")
-        if self.simulate in OPENBOOK_ONLY_SIMULATIONS and self.mode != "openbook":
-            raise ValueError(f"simulate '{self.simulate}' needs mode 'openbook'")
-        verifier_allowed = self.mode in ("chain", "openbook") or (self.mode == "auto" and self.sources)
+        if self.simulate in OPENBOOK_ONLY_SIMULATIONS and self.mode not in GROUNDED_MODES:
+            raise ValueError(f"simulate '{self.simulate}' needs mode 'openbook' or 'mcp'")
+        if self.simulate in MCP_ONLY_SIMULATIONS and self.mode != "mcp":
+            raise ValueError(f"simulate '{self.simulate}' needs mode 'mcp'")
+        if self.mode == "mcp" and not self.docs_root:
+            raise ValueError("mode 'mcp' needs docs_root: the folder of documents to serve")
+        if self.mode != "mcp" and self.docs_root is not None:
+            raise ValueError("docs_root needs mode 'mcp'")
+        if self.mode == "mcp" and self.simulate in ("triage-timeout", *CHAIN_ONLY_SIMULATIONS):
+            raise ValueError(f"simulate '{self.simulate}' does not apply to mode 'mcp'")
+        verifier_allowed = self.mode in ("chain", *GROUNDED_MODES) or (self.mode == "auto" and self.sources)
         if self.verifier_tier is not None and not verifier_allowed:
-            raise ValueError("verifier_tier needs mode 'chain' or 'openbook', or sources")
+            raise ValueError("verifier_tier needs mode 'chain', 'openbook' or 'mcp', or sources")
         return self
 
     @classmethod
@@ -336,6 +365,46 @@ class Citation(BaseModel):
     source: str
     passage_id: str
     quote: str
+    # mcp mode only: the SHA-256 the documents server gave for the cited document, and the
+    # `tool_calls` rows (by seq) whose results make up its text.
+    document_sha256: str | None = None
+    tool_call_seqs: list[int] = Field(default_factory=list)
+
+
+class PlannedCall(BaseModel):
+    """One tool call a planning model asks for in mcp mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolPlan(BaseModel):
+    """What the planning model must return in mcp mode: the tool calls it asks for.
+
+    Each call is a tool name and an arguments object, nothing more. Nothing here is
+    trusted: every call goes through toolgate.decide_call before it is sent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A plan longer than this is not a plan: it fails the schema and is treated as invalid.
+    calls: list[PlannedCall] = Field(max_length=PLAN_SCHEMA_MAX_CALLS)
+
+
+class ToolCallSummary(BaseModel):
+    """One tool call as shown to the caller (mirrors `tool_calls`). No result text."""
+
+    seq: int
+    origin: Literal["code", "plan"]
+    tool: str
+    arguments: str
+    status: Literal["ok", "refused", "error"]
+    error_type: str | None
+    error_message: str | None
+    result_bytes: int | None
+    result_sha256: str | None
+    duration_ms: float
 
 
 class CallResult(BaseModel):
@@ -498,6 +567,20 @@ class RunResult(BaseModel):
     tests_failed: int | None = None
     code_first_outcome: str | None = None
     sandbox_runs: list[SandboxRunSummary] = Field(default_factory=list)
+    # mcp mode. `tool_calls` is every call the gate saw, sent or refused, in order.
+    # `plan_status` says what became of the model's tool plan and `plan_tier` who wrote it.
+    # `documents_listed` and `documents_read` count the server's listing and the documents
+    # whose text reached the grounded pipeline. `tool_server_stopped` is whether the server
+    # process was gone before the first draft call (None: not known, or it never started).
+    # Outside mcp mode: empty, None and 0.
+    tool_calls: list[ToolCallSummary] = Field(default_factory=list)
+    plan_status: PlanStatus | None = None
+    plan_tier: str | None = None
+    docs_root: str | None = None
+    documents_listed: int = 0
+    documents_read: int = 0
+    tool_server_stopped: bool | None = None
+    tool_server_environment: list[str] = Field(default_factory=list)
     total_latency_ms: float
     total_cost_usd: float
     calls: list[CallSummary]

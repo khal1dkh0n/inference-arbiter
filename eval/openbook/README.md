@@ -117,6 +117,23 @@ Rules for a case:
 | `openbook` | The grounded pipeline: `AskRequest(mode="openbook", sources=[...])`. |
 | `stuffed:<tier>` | One call to the forced tier with every source document pasted before the question (`mode="stuffed"`). While the harness has no stuffed mode the runner pastes the sources itself and says so under the scorecard. |
 | `closed:<tier>` | One call to the forced tier with no sources: what memory alone gets. |
+| `mcp` | Mcp mode: `AskRequest(mode="mcp", docs_root=...)`. The case's documents are copied into a temporary folder under their own file names, served from there by the read-only documents server behind the tool gate, and answered by the same grounded pipeline as `openbook`. Not in the default list; name it with `--strategies`. |
+
+Notes on `mcp`:
+
+- A case is asked of its own documents only, as with the other strategies: the staged
+  folder holds exactly the case's sources and is removed after the run.
+- One extra model call per case: the tool plan (which documents to read), written by
+  `mcp_docs.plan_tier` from the question and the document names.
+- Citations name the document by file name, which the grader resolves when the name is
+  unambiguous among the case's sources. Citation validity and evidence hit are graded as
+  for `openbook`.
+- Each record also keeps `plan_status`, `documents_listed`, `documents_read`,
+  `tool_calls_total`, `tool_calls_refused`, `tool_calls_from_plan` and
+  `tool_server_stopped`.
+- Not for the large-corpus set: every chosen document is read in full through tool calls
+  on every run.
+- No scorecard yet: the strategy has not been run with a live model.
 
 ## Grading
 

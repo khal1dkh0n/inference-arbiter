@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_arbiter.telemetry import SCHEMA_VERSION, CallRecord, RunRecord, Telemetry
+from inference_arbiter.telemetry import SCHEMA_VERSION, CallRecord, RunRecord, Telemetry, ToolCallRecord
 
 REPORT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "report.py"
 
@@ -565,8 +565,8 @@ def v1_db(tmp_path: Path) -> Path:
     return v1_path
 
 
-def test_schema_version_is_8():
-    assert SCHEMA_VERSION == 8
+def test_schema_version_is_9():
+    assert SCHEMA_VERSION == 9
 
 
 def test_v1_database_is_migrated_in_place_and_old_rows_stay_readable(v1_db: Path):
@@ -1296,7 +1296,7 @@ def test_new_database_has_the_cross_check_columns(db_path: Path):
 def test_v7_database_is_migrated_to_v8_and_old_rows_get_defaults(v7_db: Path):
     Telemetry(v7_db).close()
 
-    assert [tuple(row) for row in read_all(v7_db, "SELECT version FROM schema_version")] == [(8,)]
+    assert [tuple(row) for row in read_all(v7_db, "SELECT version FROM schema_version")] == [(SCHEMA_VERSION,)]
     assert V8_RUN_COLUMNS <= run_column_names(v7_db)
     old_run = read_all(v7_db, "SELECT * FROM runs WHERE trace_id = 'old-executed-run'")[0]
     assert (old_run["cross_check"], old_run["cross_check_tier"], old_run["executed_answer_b"]) == (0, None, None)
@@ -1332,3 +1332,147 @@ def test_the_v8_migration_runs_once_and_leaves_a_cross_check_verified_alone(v7_d
     )
     labels = [row["program_label"] for row in read_all(v7_db, "SELECT * FROM sandbox_runs WHERE trace_id = 'cross-run' ORDER BY seq")]
     assert labels == ["a", "b"]
+
+
+# --- schema version 9: mcp mode, the tool_calls audit table ---
+
+V9_RUN_COLUMNS = {"plan_status", "tool_server_stopped", "tool_server_environment"}
+
+
+def make_tool_call(**overrides) -> ToolCallRecord:
+    values = dict(
+        seq=1,
+        origin="code",
+        tool="list_documents",
+        arguments="{}",
+        arguments_truncated=False,
+        status="ok",
+        error_type=None,
+        result_bytes=120,
+        result_sha256="c" * 64,
+        is_error=False,
+        duration_ms=1.5,
+    )
+    values.update(overrides)
+    return ToolCallRecord(**values)
+
+
+@pytest.fixture
+def v8_db(db_path: Path) -> Path:
+    """A version 8 database: no tool_calls table and no mcp columns on runs."""
+    telemetry = Telemetry(db_path)
+    telemetry.record(make_run("old-openbook-run", mode="openbook", grounding_status="grounded"), [make_call()])
+    telemetry.record(
+        make_run("old-execute-run", mode="execute", execution_status="executed"), [make_call()], [make_sandbox_run()]
+    )
+    telemetry.close()
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            for column in V9_RUN_COLUMNS:
+                conn.execute(f"ALTER TABLE runs DROP COLUMN {column}")
+            conn.execute("DROP INDEX idx_tool_calls_trace_id")
+            conn.execute("DROP TABLE tool_calls")
+            conn.execute("UPDATE schema_version SET version = 8")
+    finally:
+        conn.close()
+    return db_path
+
+
+def test_new_database_has_the_tool_calls_table_and_the_mcp_columns(db_path: Path):
+    Telemetry(db_path).close()
+
+    assert V9_RUN_COLUMNS <= run_column_names(db_path)
+    assert table_column_names(db_path, "tool_calls") == {
+        "id", "trace_id", "seq", "origin", "tool", "arguments", "arguments_truncated", "status",
+        "error_type", "result_bytes", "result_sha256", "is_error", "duration_ms",
+    }
+
+
+def test_the_tool_calls_table_has_no_column_for_result_text(db_path: Path):
+    Telemetry(db_path).close()
+
+    columns = table_column_names(db_path, "tool_calls")
+    assert not {"result", "result_text", "text", "content"} & columns
+
+
+def test_v8_database_is_migrated_to_v9_and_old_rows_get_defaults(v8_db: Path):
+    assert "plan_status" not in run_column_names(v8_db)
+
+    Telemetry(v8_db).close()
+
+    assert [tuple(row) for row in read_all(v8_db, "SELECT version FROM schema_version")] == [(9,)]
+    assert V9_RUN_COLUMNS <= run_column_names(v8_db)
+    for old_run in read_all(v8_db, "SELECT * FROM runs"):
+        assert (old_run["plan_status"], old_run["tool_server_stopped"], old_run["tool_server_environment"]) == (
+            None, None, None,
+        )
+    modes = {row["trace_id"]: row["mode"] for row in read_all(v8_db, "SELECT * FROM runs")}
+    assert modes == {"old-openbook-run": "openbook", "old-execute-run": "execute"}
+    assert read_all(v8_db, "SELECT * FROM tool_calls") == []
+    assert len(read_all(v8_db, "SELECT * FROM sandbox_runs")) == 1
+
+
+def test_v8_to_v9_migration_is_idempotent_and_the_migrated_database_takes_tool_calls(v8_db: Path):
+    Telemetry(v8_db).close()
+    telemetry = Telemetry(v8_db)
+    telemetry.record(
+        make_run(
+            "mcp-run", mode="mcp", plan_status="partial", tool_server_stopped=True,
+            tool_server_environment='["HOME", "PATH"]',
+        ),
+        [make_call(role="plan"), make_call(seq=2, role="draft")],
+        None,
+        [
+            make_tool_call(),
+            make_tool_call(
+                seq=2, origin="plan", tool="read_document", status="refused", error_type="unknown_document",
+                arguments='{"max_lines": 5, "path": "x.md", "start_line": 1}', result_bytes=None,
+                result_sha256=None, duration_ms=0.0,
+            ),
+            make_tool_call(seq=3, origin="plan", tool="read_document", status="error", error_type="tool_error", is_error=True),
+        ],
+    )
+    telemetry.close()
+    Telemetry(v8_db).close()
+
+    assert [tuple(row) for row in read_all(v8_db, "SELECT version FROM schema_version")] == [(9,)]
+    run = read_all(v8_db, "SELECT * FROM runs WHERE trace_id = 'mcp-run'")[0]
+    assert (run["mode"], run["plan_status"], run["tool_server_stopped"]) == ("mcp", "partial", 1)
+    assert run["tool_server_environment"] == '["HOME", "PATH"]'
+    rows = read_all(v8_db, "SELECT * FROM tool_calls WHERE trace_id = 'mcp-run' ORDER BY seq")
+    assert [(row["seq"], row["origin"], row["tool"], row["status"], row["error_type"]) for row in rows] == [
+        (1, "code", "list_documents", "ok", None),
+        (2, "plan", "read_document", "refused", "unknown_document"),
+        (3, "plan", "read_document", "error", "tool_error"),
+    ]
+    assert (rows[1]["result_bytes"], rows[1]["result_sha256"], rows[1]["is_error"]) == (None, None, 0)
+    assert (rows[0]["result_bytes"], rows[0]["result_sha256"], rows[2]["is_error"]) == (120, "c" * 64, 1)
+
+
+def test_v1_database_is_migrated_straight_to_v9(v1_db: Path):
+    Telemetry(v1_db).close()
+
+    assert [tuple(row) for row in read_all(v1_db, "SELECT version FROM schema_version")] == [(9,)]
+    assert V9_RUN_COLUMNS <= run_column_names(v1_db)
+    assert read_all(v1_db, "SELECT * FROM tool_calls") == []
+
+
+def test_a_server_that_was_not_seen_to_stop_is_stored_as_zero_and_unknown_as_null(db_path: Path):
+    telemetry = Telemetry(db_path)
+    telemetry.record(make_run("still-there", mode="mcp", tool_server_stopped=False), [make_call()])
+    telemetry.record(make_run("not-known", mode="mcp"), [make_call()])
+    telemetry.close()
+
+    stopped = {row["trace_id"]: row["tool_server_stopped"] for row in read_all(db_path, "SELECT * FROM runs")}
+    assert stopped == {"still-there": 0, "not-known": None}
+
+
+def test_a_run_and_its_tool_calls_land_together_or_not_at_all(db_path: Path, capsys):
+    telemetry = Telemetry(db_path)
+    telemetry.record(make_run("bad-run", mode="mcp"), [make_call()], None, [make_tool_call(tool=None)])
+    telemetry.close()
+
+    assert read_all(db_path, "SELECT * FROM runs") == []
+    assert read_all(db_path, "SELECT * FROM tool_calls") == []
+    assert "record failed" in capsys.readouterr().err

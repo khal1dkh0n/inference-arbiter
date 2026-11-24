@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from inference_arbiter import auto, chain, codetest, computation_check, execute, openbook, sandbox
+from inference_arbiter import auto, chain, codetest, computation_check, execute, mcpdocs, openbook, sandbox
 from inference_arbiter.clients import ERROR_TIMEOUT, ChatCall, ChatClient, build_clients
 from inference_arbiter.config import (
     DEFAULT_CONFIG_PATH,
@@ -47,13 +47,16 @@ from inference_arbiter.schemas import (
     ExecutionStatus,
     GroundingStatus,
     Message,
+    PlanStatus,
     RouteReason,
     RunResult,
     SandboxRunSummary,
+    ToolCallSummary,
     TriageOutcome,
     VerificationStatus,
 )
-from inference_arbiter.telemetry import CallRecord, RunRecord, SandboxRunRecord, Telemetry
+from inference_arbiter.telemetry import CallRecord, RunRecord, SandboxRunRecord, Telemetry, ToolCallRecord
+from inference_arbiter.toolgate import ToolCall
 from inference_arbiter.triage import extract_text, last_user_text, run_triage
 
 DEFAULT_DB_PATH = Path("data/telemetry.db")
@@ -92,6 +95,10 @@ class ExecuteNotConfiguredError(ValueError):
 
 class CodeTestNotConfiguredError(ValueError):
     """Raised when codetest mode is requested but the config has no code_test block."""
+
+
+class McpNotConfiguredError(ValueError):
+    """Raised when mcp mode is requested but the config has no mcp_docs block."""
 
 
 @dataclass
@@ -144,6 +151,14 @@ class _RunOutcome:
     tests_failed: int | None = None
     code_first_outcome: str | None = None
     sandbox_records: list[SandboxRunRecord] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    plan_status: PlanStatus | None = None
+    plan_tier: str | None = None
+    docs_root: str | None = None
+    documents_listed: int = 0
+    documents_read: int = 0
+    tool_server_stopped: bool | None = None
+    tool_server_environment: list[str] = field(default_factory=list)
     call_records: list[CallRecord] = field(default_factory=list)
     call_messages: list[str | None] = field(default_factory=list)
 
@@ -257,7 +272,10 @@ class Harness:
         telemetry: Telemetry,
         source_transport: httpx.BaseTransport | None = None,
         sandbox_runner: sandbox.CommandRunner | None = None,
+        tool_session_opener: mcpdocs.SessionOpener | None = None,
     ) -> None:
+        # Only tests set this: it replaces the documents server process in mcp mode.
+        self._tool_session_opener = tool_session_opener
         self._config = config
         self._clients = clients
         self._telemetry = telemetry
@@ -583,6 +601,34 @@ class Harness:
         )
         return self._outcome_from_openbook(openbook_outcome)
 
+    def _answer_mcp(
+        self, request: AskRequest, selected_tier: str, verifier_tier_name: str
+    ) -> _RunOutcome:
+        config = self._config
+        mcp_outcome = mcpdocs.run_mcp(
+            config=config,
+            mcp_config=config.mcp_docs,
+            clients=self._clients,
+            request=request,
+            question=last_user_text(request.messages),
+            draft_tier=selected_tier,
+            verifier_tier_name=verifier_tier_name,
+            call_tier=self._plain_tier_caller(),
+            simulated_answer_failure=lambda: _simulated_failure(ERROR_SIMULATED_ERROR),
+            resolve_fallback=lambda failed_tier: resolve_fallback_tier(config, failed_tier),
+            open_session=self._tool_session_opener or mcpdocs.open_stdio_session,
+        )
+        outcome = self._outcome_from_openbook(mcp_outcome.pipeline)
+        outcome.tool_calls = mcp_outcome.tool_calls
+        outcome.plan_status = mcp_outcome.plan_status
+        outcome.plan_tier = mcp_outcome.plan_tier
+        outcome.docs_root = request.docs_root
+        outcome.documents_listed = mcp_outcome.documents_listed
+        outcome.documents_read = mcp_outcome.documents_read
+        outcome.tool_server_stopped = mcp_outcome.server_stopped
+        outcome.tool_server_environment = list(mcp_outcome.environment_names)
+        return outcome
+
     def _answer_stuffed(
         self,
         request: AskRequest,
@@ -895,7 +941,11 @@ class Harness:
             raise OpenbookNotConfiguredError(
                 f"{request.mode} mode needs an `openbook:` block in the config"
             )
-        if request.mode == "openbook":
+        if request.mode == "mcp" and (config.mcp_docs is None or config.openbook is None):
+            raise McpNotConfiguredError(
+                "mcp mode needs an `mcp_docs:` block and an `openbook:` block in the config"
+            )
+        if request.mode in ("openbook", "mcp"):
             grounding_verifier_name = self._resolve_grounding_verifier_tier(request)
         if request.mode == "execute" and config.execute is None:
             raise ExecuteNotConfiguredError("execute mode needs an `execute:` block in the config")
@@ -922,8 +972,8 @@ class Harness:
             )
             call_messages.append(check.call.error_message)
 
-        if request.mode in ("openbook", "execute", "codetest") or auto_reason is not None:
-            # The tier is config-selected: openbook, execute, codetest and auto make no triage call.
+        if request.mode in ("openbook", "mcp", "execute", "codetest") or auto_reason is not None:
+            # The tier is config-selected: openbook, mcp, execute, codetest and auto make no triage call.
             triage = TriageOutcome(status="skipped")
         else:
             triage = self._triage(request)
@@ -933,7 +983,7 @@ class Harness:
             )
             call_messages.append(triage.call.error_message)
 
-        if request.mode == "openbook" and request.tier is None:
+        if request.mode in ("openbook", "mcp") and request.tier is None:
             selected_tier, route_reason = config.openbook.drafter_tier, "configured"
         elif request.mode == "execute" and request.tier is None:
             selected_tier, route_reason = config.execute.tier, "configured"
@@ -945,7 +995,9 @@ class Harness:
             selected_tier, route_reason = choose_route(config, request.tier, triage)
         answer_messages = text_only_messages(request.messages)
 
-        if grounding_verifier_name is not None:
+        if request.mode == "mcp":
+            outcome = self._answer_mcp(request, selected_tier, grounding_verifier_name)
+        elif grounding_verifier_name is not None:
             outcome = self._answer_openbook(request, selected_tier, grounding_verifier_name, preloaded)
         elif request.mode == "stuffed":
             outcome = self._answer_stuffed(request, selected_tier, preloaded)
@@ -1021,8 +1073,31 @@ class Harness:
             cross_check_tier=outcome.cross_check_tier,
             executed_answer_b=outcome.executed_answer_b,
             cross_check_rule=outcome.cross_check_rule,
+            plan_status=outcome.plan_status,
+            tool_server_stopped=outcome.tool_server_stopped,
+            tool_server_environment=(
+                json.dumps(outcome.tool_server_environment) if request.mode == "mcp" else None
+            ),
         )
-        if outcome.sandbox_records:
+        if request.mode == "mcp":
+            tool_call_records = [
+                ToolCallRecord(
+                    seq=tool_call.seq,
+                    origin=tool_call.origin,
+                    tool=tool_call.tool,
+                    arguments=tool_call.arguments,
+                    arguments_truncated=tool_call.arguments_truncated,
+                    status=tool_call.status,
+                    error_type=tool_call.error_type,
+                    result_bytes=tool_call.result_bytes,
+                    result_sha256=tool_call.result_sha256,
+                    is_error=tool_call.is_error,
+                    duration_ms=tool_call.duration_ms,
+                )
+                for tool_call in outcome.tool_calls
+            ]
+            self._telemetry.record(run_record, call_records, None, tool_call_records)
+        elif outcome.sandbox_records:
             self._telemetry.record(run_record, call_records, outcome.sandbox_records)
         else:
             self._telemetry.record(run_record, call_records)
@@ -1131,6 +1206,28 @@ class Harness:
                 )
                 for record in outcome.sandbox_records
             ],
+            tool_calls=[
+                ToolCallSummary(
+                    seq=tool_call.seq,
+                    origin=tool_call.origin,
+                    tool=tool_call.tool,
+                    arguments=tool_call.arguments,
+                    status=tool_call.status,
+                    error_type=tool_call.error_type,
+                    error_message=tool_call.error_message,
+                    result_bytes=tool_call.result_bytes,
+                    result_sha256=tool_call.result_sha256,
+                    duration_ms=tool_call.duration_ms,
+                )
+                for tool_call in outcome.tool_calls
+            ],
+            plan_status=outcome.plan_status,
+            plan_tier=outcome.plan_tier,
+            docs_root=outcome.docs_root,
+            documents_listed=outcome.documents_listed,
+            documents_read=outcome.documents_read,
+            tool_server_stopped=outcome.tool_server_stopped,
+            tool_server_environment=outcome.tool_server_environment,
             total_latency_ms=total_latency_ms,
             total_cost_usd=total_cost_usd,
             calls=call_summaries,

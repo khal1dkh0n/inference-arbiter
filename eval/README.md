@@ -4,7 +4,7 @@ Fixed evaluation set for the Phase 2 offline harness (see `inference_arbiter_arc
 
 File: `eval/golden_questions.yaml` (version 2, 36 cases). Version 1 had 25; version 2 (2026-11-22) added 11 harder reasoning, code, domain and trap cases to reach the 30 to 50 the build plan asks for. The added cases were written and their answers computed before any model was run on them; none was chosen because a particular tier failed it. Scorecards from version 1 are not comparable with version 2.
 
-This file covers the closed-book suite. The open-book suite (`scripts/run_eval.py --suite openbook`: questions answered from supplied source documents, with abstention and citation grading) is described in `eval/openbook/README.md`. Recorded scorecards for both are in `eval/results/`.
+This file covers the closed-book suite. The open-book suite (`scripts/run_eval.py --suite openbook`: questions answered from supplied source documents, with abstention and citation grading) is described in `eval/openbook/README.md`; its `mcp` strategy runs the same questions through mcp mode. Recorded scorecards for both are in `eval/results/`.
 
 ## Case schema
 
@@ -182,6 +182,8 @@ uv run python scripts/run_eval.py --golden eval/code_questions.yaml --strategies
 ```
 
 Pass `--routes-out` and `--db` so a run of this file leaves the golden set's routes and telemetry alone. The run needs the `sbx` CLI: grading itself runs code in the sandbox.
+
+First run, 2026-11-24, `tier:mid` and `codetest:mid+local` only: `eval/results/2026-11-24-code-tests.md`. The three strategies together are about 170 model calls and take about 50 minutes; the runner writes its records only when a run ends, so run one strategy per command.
 
 ### Case schema
 

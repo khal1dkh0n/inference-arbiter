@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_arbiter import codetest, sandbox
+from inference_arbiter import codetest, docs_server, sandbox, toolgate
 from inference_arbiter.clients import ChatCall, EmbedCall, EmbedResult
 from inference_arbiter.config import HarnessConfig
 from inference_arbiter.router import Harness
@@ -132,10 +132,12 @@ class FakeTelemetry:
         self.recorded: list[tuple] = []
 
         self.sandbox_recorded: list[list] = []
+        self.tool_calls_recorded: list[list] = []
 
-    def record(self, run, calls, sandbox_runs=None) -> None:
+    def record(self, run, calls, sandbox_runs=None, tool_calls=None) -> None:
         self.recorded.append((run, list(calls)))
         self.sandbox_recorded.append(list(sandbox_runs or []))
+        self.tool_calls_recorded.append(list(tool_calls or []))
 
 
 class FakeSandboxRunner:
@@ -237,18 +239,95 @@ def sandbox_result(
     )
 
 
+class FolderToolSession:
+    """A ToolSession that answers from a real folder with the server's own index and page
+    code, in this process. No subprocess and no `mcp` package: only the transport is faked.
+
+    `on_call` is called before every tool call, so a test can see what was true at that
+    moment. `extra_tools` are offered on top of the server's two. `fail_on` maps a tool
+    name to an exception or a ToolReply returned instead of the real answer.
+    """
+
+    environment_names = ("HOME", "PATH")
+
+    def __init__(self, root: str, limits: docs_server.ServerLimits, start_timeout_s: float = 0.0) -> None:
+        self.root = root
+        self.limits = limits
+        self.index = docs_server.build_index(docs_server.resolve_root(root), limits)
+        self.sent: list[tuple[str, dict]] = []
+        self.closed = False
+        self.close_result: bool | None = True
+        self.extra_tools: list[str] = []
+        self.fail_on: dict[str, object] = {}
+        self.on_call = None
+
+    def list_tools(self, timeout_s: float) -> list[str]:
+        return [docs_server.TOOL_LIST_DOCUMENTS, docs_server.TOOL_READ_DOCUMENT, *self.extra_tools]
+
+    def call_tool(self, name: str, arguments: dict, timeout_s: float) -> toolgate.ToolReply:
+        if self.closed:
+            raise AssertionError("a tool was called after the session was closed")
+        if self.on_call is not None:
+            self.on_call(name, arguments)
+        self.sent.append((name, arguments))
+        if name in self.fail_on:
+            failure = self.fail_on[name]
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+        if name == docs_server.TOOL_LIST_DOCUMENTS:
+            return toolgate.ToolReply(docs_server.encode_result(docs_server.list_documents_result(self.index)))
+        try:
+            result = docs_server.read_document_result(self.index, self.limits, **arguments)
+        except docs_server.DocsRequestError as request_error:
+            return toolgate.ToolReply(str(request_error), is_error=True)
+        return toolgate.ToolReply(docs_server.encode_result(result))
+
+    def close(self) -> bool | None:
+        self.closed = True
+        return self.close_result
+
+
+class ToolSessions:
+    """The session opener a test harness uses: remembers every session it opened."""
+
+    def __init__(self) -> None:
+        self.opened: list[FolderToolSession] = []
+        self.open_error: Exception | None = None
+        self.prepare = None
+
+    def __call__(self, root: str, limits: docs_server.ServerLimits, start_timeout_s: float) -> FolderToolSession:
+        if self.open_error is not None:
+            raise self.open_error
+        session = FolderToolSession(root, limits, start_timeout_s)
+        if self.prepare is not None:
+            self.prepare(session)
+        self.opened.append(session)
+        return session
+
+    @property
+    def last(self) -> FolderToolSession:
+        return self.opened[-1]
+
+
 class HarnessKit:
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
         self.client = FakeClient()
         self.telemetry = FakeTelemetry()
         self.sandbox_runner = FakeSandboxRunner()
+        self.tool_sessions = ToolSessions()
         self.harness = Harness(
             config,
             {"ollama": self.client, "openrouter": self.client},
             self.telemetry,
             sandbox_runner=self.sandbox_runner,
+            tool_session_opener=self.tool_sessions,
         )
+
+    @property
+    def tool_call_records(self):
+        return self.telemetry.tool_calls_recorded[-1]
 
     @property
     def sandbox_records(self):
@@ -333,6 +412,11 @@ def make_openbook_config(cache_dir, openbook_overrides: dict | None = None, **ov
     config = HarnessConfig.model_validate(raw_config)
     config.sha256 = "test-config-sha"
     return config
+
+
+def make_mcp_config(cache_dir, mcp_overrides: dict | None = None, **overrides) -> HarnessConfig:
+    """The open-book test config plus an mcp_docs block planning on mid."""
+    return make_openbook_config(cache_dir, mcp_docs={"plan_tier": "mid", **(mcp_overrides or {})}, **overrides)
 
 
 def make_execute_config(execute_overrides: dict | None = None, **overrides) -> HarnessConfig:

@@ -189,7 +189,8 @@ def test_grounded_answer_is_returned_with_citations(ob_kit, source_paths):
     assert result.retrieval_method == "lexical"
     assert (result.claims_total, result.claims_supported) == (2, 2)
     assert result.grounding_verifier_tier == "ground_chat"
-    assert [citation.model_dump() for citation in result.citations] == [
+    # The two mcp-mode fields of a citation stay at their defaults in open-book mode.
+    assert [citation.model_dump(exclude_defaults=True) for citation in result.citations] == [
         {"source": source_paths[0], "passage_id": "S1-P1", "quote": THRESHOLD_CLAIM["quote"]},
         {"source": source_paths[1], "passage_id": "S2-P1", "quote": CODE_CLAIM["quote"]},
     ]

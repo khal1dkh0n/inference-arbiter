@@ -383,10 +383,11 @@ execute:
 #   solution_tier      answer tier that writes the solution and its one repair; --tier
 #   tests_tier         answer tier that writes the tests; --tests-tier. A free tier with a
 #                      different model from solution_tier is preferred, so one model does not
-#                      pass its own mistake. Not measured yet: `local` is the other free
-#                      model, and as program B of the cross-check it was the weaker writer.
-#                      In a three-case smoke run (2026-11-24) its tests held a wrong expected
-#                      value in every case and failed three right solutions
+#                      pass its own mistake. Measured 2026-11-24 on the 20-case code set,
+#                      one run each (eval/results/2026-11-24-code-tests.md): the tests
+#                      `local` wrote failed 13 of 20 solutions that pass the reference
+#                      tests, and in each case they also fail the reference solution.
+#                      `mid` as tests tier is not measured
 #   think              Ollama only: `think` for the solution and repair calls; omit to use the
 #                      tier's own setting. The interface and tests calls use their tiers' own
 #   max_repairs        0 or 1: one rewrite of a solution that failed its tests or could not be
@@ -402,3 +403,50 @@ code_test:
   max_repairs: 1
   parallel: true
   max_program_bytes: 60000
+
+# mcp mode (`ask --docs DIR`): answer from the .md and .txt documents of one local folder,
+# fetched through a read-only MCP server (src/inference_arbiter/docs_server.py). The server
+# is a process on this host, started for the run and stopped before any model reads a
+# document. No sandbox is involved, and the server is confined to the folder by its own
+# path checks, not by the operating system. Every call to it passes the tool gate
+# (src/inference_arbiter/toolgate.py): an allow-list of two tools, list_documents and
+# read_document, argument and result limits, and one telemetry row per call, sent or
+# refused. One call to plan_tier sees the question and the document names and sizes (never
+# their content) and returns the tool calls it wants; each goes through the same gate, and
+# a refused one is recorded and not sent. The documents then go to the grounded pipeline
+# of the `openbook:` block above (drafter, verifier, retrieval, escalation), so citations
+# are checked verbatim against what the server returned. Needs the `mcp` package
+# (`uv sync --extra mcp`). Auto mode never picks this mode.
+#   plan_tier               answer tier that writes the tool plan
+#   max_planned_calls       planned calls past this number are refused (plan_call_limit)
+#   max_calls               gate: calls sent to the server in one run, planned or not
+#   max_argument_bytes      gate: the arguments of one call, as JSON
+#   max_result_bytes        gate: one result; a larger one fails the call, it is never cut
+#   max_total_result_bytes  gate: all results of one run together
+#   call_timeout_s          gate: one tool call
+#   start_timeout_s         starting the server and its handshake
+#   max_documents           server: documents indexed; the rest are skipped and counted
+#   max_document_bytes      server: one document (same as openbook.max_source_bytes)
+#   max_total_bytes         server: all indexed documents together
+#   max_name_chars          server and gate: length of a document's relative path. Names are
+#                           shown to the planning model, so their length and count are capped
+#   max_lines_per_read      server: lines one read_document call returns
+#   max_read_bytes          server: text bytes one read_document call returns
+#   max_lifetime_s          server: it ends itself after this long whatever the harness does;
+#                           keep it above the plan tier's timeout_s
+mcp_docs:
+  plan_tier: mid
+  max_planned_calls: 16
+  max_calls: 64
+  max_argument_bytes: 2000
+  max_result_bytes: 200000
+  max_total_result_bytes: 12000000
+  call_timeout_s: 10
+  start_timeout_s: 20
+  max_documents: 64
+  max_document_bytes: 2000000
+  max_total_bytes: 8000000
+  max_name_chars: 120
+  max_lines_per_read: 400
+  max_read_bytes: 64000
+  max_lifetime_s: 300

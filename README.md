@@ -13,7 +13,9 @@ Python program, an isolated `sbx` MicroVM runs it, and code compares the output 
 answer the model claimed, when it claimed one) and `--code-test` (for a question that asks
 for a Python function: a solution and unit tests are written by separate calls, the test
 writer never sees the solution, both run in one sandbox and the answer says whether the
-solution passed its generated tests). Governing specs: `inference_arbiter_architecture_build_plan.md` and
+solution passed its generated tests) and `--docs DIR` (the documents of one local folder are
+fetched through a read-only MCP server behind a tool gate that logs every call, and the
+grounded pipeline answers from them). Governing specs: `inference_arbiter_architecture_build_plan.md` and
 `inference_arbiter_thread_discussion_summary.md`.
 
 ## Setup
@@ -23,6 +25,10 @@ Requires `uv` and a running Ollama daemon on `http://localhost:11434`.
 ```bash
 uv sync --python 3.12
 ```
+
+That installs the `mcp` package too (it is in the dev group), which only mcp mode
+(`--docs`) uses. An install without the dev group needs `uv sync --extra mcp` for that
+mode; every other mode runs without the package.
 
 For the `frontier` tier, copy `.env.example` to `.env` and set `OPENROUTER_API_KEY` and
 `FRONTIER_MODEL` (the OpenRouter model id to use). Without them the harness still runs: a
@@ -109,6 +115,7 @@ Explicit flags win over auto:
 | `--cross-check-tier NAME` | The tier that writes the second program (implies `--cross-check`). Default `execute.cross_check_tier`, else the tier that writes the first |
 | `--tier NAME` | Answer with this tier, no triage (`local`, `code`, `local_heavy`, `mid`, `frontier`). Alone it is one forced call; with `--chain` it forces the draft tier; with `--sources` it is the stuffed or drafting tier, and its context window is the one checked |
 | `--sources PATH_OR_URL [...]` | Answer from these files or http(s) URLs. Put the question before this flag |
+| `--docs DIR` | Mcp mode: answer from the `.md` and `.txt` documents of this folder, fetched through a read-only MCP server behind the tool gate (see "MCP mode"). Not combinable with `--sources` or another mode flag |
 | `--require-citations` | With `--sources`: always the open-book pipeline. Without `--sources` it is a usage error: there is nothing to cite |
 | `--stuffed` | With `--sources`: always one call with the full text of every source in the prompt. Triage picks the tier unless `--tier` is given (this is the eval baseline, unchanged) |
 | `--verifier-tier NAME` | With `--chain`: verifier tier to use (`verify`, `verify_jev`); default is `chain.verifier_tier`. With `--sources`: grounding verifier (`ground_jev`, `ground_chat`) when the pipeline runs; default is `openbook.grounding_verifier_tier` |
@@ -116,11 +123,12 @@ Explicit flags win over auto:
 | `--effort low\|medium\|high` | Override the tier's effort |
 | `--config PATH` | Config file (default `config/models.yaml`) |
 | `--db PATH` | Telemetry database (default `data/telemetry.db`) |
-| `--simulate triage-timeout\|answer-error\|verifier-error\|draft-invalid\|quote-mismatch\|grounding-error` | Inject a failure to exercise the fail paths. `verifier-error` and `draft-invalid` need `--chain`; `quote-mismatch` (every quote of the first draft fails the quote check) and `grounding-error` (the grounding verifier fails) need `--sources` without `--stuffed` and select the open-book pipeline |
+| `--simulate triage-timeout\|answer-error\|verifier-error\|draft-invalid\|quote-mismatch\|grounding-error\|tool-refused` | Inject a failure to exercise the fail paths. `verifier-error` and `draft-invalid` need `--chain`; `quote-mismatch` (every quote of the first draft fails the quote check) and `grounding-error` (the grounding verifier fails) need `--docs`, or `--sources` without `--stuffed`, and select the grounded pipeline; `tool-refused` needs `--docs`: the harness asks the tool gate for a tool that is not on its allow-list, the gate refuses and records it, and the run ends without a model call |
 | `--json` | Print the full run result as JSON on stdout |
 
 In code, `AskRequest.mode` defaults to `auto` and takes `route`, `chain`, `openbook`,
-`stuffed` or `execute` to choose explicitly; `require_citations=True` is the flag's equivalent.
+`stuffed`, `execute`, `codetest` or `mcp` (with `docs_root`) to choose explicitly;
+`require_citations=True` is the flag's equivalent.
 `RunResult.mode` is always the mode that ran. The eval runner requests its modes
 explicitly, so its strategies mean what they meant before auto existed.
 
@@ -129,7 +137,9 @@ The answer goes to stdout and the routing trace to stderr. Exit codes: `0` answe
 
 Other commands:
 
-- `uv run pytest` - unit tests (fake clients, a fake `sbx`, no network, no real database)
+- `uv run pytest` - unit tests (fake clients, a fake `sbx`, no network, no real database, no
+  model). The tests in `tests/test_mcp_session.py` start the real documents server as a
+  subprocess on a temporary folder; they are skipped when the `mcp` package is not installed
 - `INFERENCE_ARBITER_LIVE_SANDBOX=1 uv run pytest tests/test_sandbox_live.py -v -s` - the opt-in
   live test: runs an isolation probe in a real sandbox (skipped without the flag or `sbx`)
 - `uv run python scripts/smoke.py` - five live questions through the router (route mode)
@@ -779,15 +789,136 @@ first solution's run was classed, kept apart from the repaired one's). Each sand
 is a `sandbox_runs` row whose `program` is the whole program the gate ran and whose
 `executed_answer` is the result line.
 
-Not measured yet: no scorecard exists for this mode. `code_test.tests_tier: local`
-follows the two-model preference and is a guess about quality; in the cross-check the
-same local model was the weaker program writer. A first smoke run of three code-set cases
-(CQ-01, CQ-12, CQ-17, 2026-11-24, `codetest:mid+local`, one run each, 0 USD) proved the
-path end to end and points the same way: all three solutions passed the reference tests,
-and all three were reported `tests_failed`, because the generated tests held a wrong
-expected value in each case (the same tests fail the reference solution). Three cases
-decide nothing; the full run on the code set with `codetest:mid+local` against
-`codetest:mid+mid` and `tier:mid` is still to do.
+Measured 2026-11-24 on the code set (20 cases, one run each,
+`eval/results/2026-11-24-code-tests.md`), with the shipped `code_test:` block
+(`codetest:mid+local`) against a single `mid` call:
+
+- Both got 20 of 20 by the reference tests, and `mid` was right on every first attempt, so
+  the mode added no accuracy on this set. Median latency 28.8 s against 19.2 s.
+- The tests written by `local` are not reliable. The run reported `tests_failed` for 13 of
+  the 20 solutions, all of which pass the reference tests; in every such case the
+  generated tests also fail the case's reference solution. Treat a `tests_failed` from
+  the shipped config as "the solution or the tests are wrong", as the answer text says.
+- 14 repairs ran against such tests and none broke a solution.
+- Only 5 generated suites accept their reference solution; they fail 8 of their 10 seeded
+  wrong solutions.
+
+Not measured: `codetest:mid+mid` (the run did not finish), so whether `mid` writes better
+tests than `local` is open, and so is the mode's worth on questions a single call gets
+wrong. Auto mode never picks this mode.
+
+## MCP mode
+
+`ask "question" --docs DIR` answers from the `.md` and `.txt` documents of one local
+folder. The documents are not read by the harness: they are served by a small MCP server
+(`src/inference_arbiter/docs_server.py`) and fetched through a gate
+(`src/inference_arbiter/toolgate.py`) that allows two tools, checks every call and logs
+every call. The answer then comes from the same grounded pipeline as open-book mode, so
+each citation is checked verbatim against text the server returned.
+
+What this mode is and is not:
+
+- The server is a process on this host, a stdio subprocess of the harness. No sandbox is
+  involved: the sandboxes of execute mode have no network and nothing can be installed in
+  them, so a server there could not be reached.
+- The server is confined to the folder by its own code, not by the operating system. It
+  runs as the calling user and could, if its code were wrong, read anything that user can.
+- "Scoped" means: two read-only tools, and only the files indexed from one folder when the
+  server started. "Per run" means: one server process per question, started inside
+  `Harness.answer` and stopped before any model is given document text.
+- Auto mode never picks this mode.
+
+### What one run does
+
+| Step | What happens |
+| --- | --- |
+| 1. Start | The server is started on the folder. The gate asks which tools it offers; anything but exactly `list_documents` and `read_document` ends the run (`tool_list_mismatch`) |
+| 2. List | Code calls `list_documents`: path, size, line count and SHA-256 of each document |
+| 3. Plan | One call to `mcp_docs.plan_tier` gets the question and that listing, never any content, and returns a tool plan: a list of tool names with arguments. This is the only model call made while the server is alive |
+| 4. Gate | Every planned call goes through the gate like any other. A refused call is recorded and not sent, and does not end the run. The table under "The tool plan" says what happens next |
+| 5. Read | Code reads the rest of each chosen document page by page and checks the assembled text against the SHA-256 from the listing |
+| 6. Stop | The server is stopped and the harness checks that the process is gone |
+| 7. Answer | The documents go to the open-book pipeline unchanged: retrieval, cited draft, quote check, grounding verifier, at most one escalation |
+
+Model calls: one plan call plus at most the five of the open-book pipeline. A failed
+server call (a timeout, a server-side error, an unusable or oversized result) is never
+worked around: the run ends with that typed error.
+
+### The server
+
+- Root: resolved once. `/`, the home folder and any folder above it are refused.
+- Index: built once at start, without following symbolic links. A file is served only if
+  it is a regular file, not a link, ends in `.md` or `.txt`, has a plain name (letters,
+  digits, `.`, `_`, `-`; no leading dot, so never `.env`), resolves to a path under the
+  root, is UTF-8 text and is inside the size limits. What was skipped is counted by reason
+  in the listing.
+- Snapshot: the text of every indexed file is read at start and kept in memory. The
+  server opens no file after that, so a file swapped for a link later changes nothing.
+- `read_document` takes a path only as an exact key of the index. `..`, an absolute path
+  or a link is not a key.
+- No tool writes. Files are opened read-only.
+- Environment: `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM` and `USER`, which the `mcp`
+  client passes to any stdio server; nothing else, so no key from `.env` reaches it. The
+  names are stored with the run.
+- It ends when its stdin closes, and on its own after `mcp_docs.max_lifetime_s` in any case.
+- Its stderr goes to a capped buffer, not to the harness's output.
+- The harness registers no sampling, elicitation or roots handler.
+
+### The gate
+
+A call is refused, without contacting the server, by the first row that matches
+(`toolgate.decide_call`, a pure function):
+
+| # | Condition | Refusal |
+| --- | --- | --- |
+| 1 | The tool is not on the allow-list | `tool_not_allowed` |
+| 2 | The arguments as JSON are over `max_argument_bytes` | `tool_arguments_too_large` |
+| 3 | The arguments are not an object or do not fit the tool's shape | `tool_arguments_invalid` |
+| 4 | A path that is absolute or contains `..`, `.`, a backslash or NUL | `path_not_allowed` |
+| 5 | A path that is not one of the listed documents | `unknown_document` |
+| 6 | `max_calls` calls were already sent in this run | `tool_call_limit` |
+
+An allowed call is sent with a timeout. Its reply fails (`toolgate.classify_reply`) when
+the server marks it as an error (`tool_error`), when it holds anything but text or does
+not parse into the expected shape (`tool_result_invalid`), when it is over
+`max_result_bytes` (`tool_result_too_large`; a result is never cut to fit) or when the run
+would pass `max_total_result_bytes` (`tool_result_budget`). A server that does not answer
+is `mcp_timeout`; one that cannot be started or dies is `mcp_unavailable`.
+
+### The tool plan
+
+The planning model's output is the only model-written input to the gate. What becomes of
+it (`mcpdocs.decide_plan`, a pure function; first match wins):
+
+| # | Plan call | Planned calls | Allowed by the gate | `plan_status` | What happens |
+| --- | --- | --- | --- | --- | --- |
+| 1 | failed | - | - | `call_failed` | Every listed document is read |
+| 2 | output fails the schema | - | - | `invalid` | Every listed document is read. No second attempt |
+| 3 | ok | none | - | `empty` | Every listed document is read |
+| 4 | ok | one or more | none | `all_refused` | The run ends with `plan_refused`. Nothing is read |
+| 5 | ok | one or more | some, but no read | `no_read` | Every listed document is read |
+| 6 | ok | more than `max_planned_calls` | at least one read | `over_cap` | The calls past the cap are refused (`plan_call_limit`); the allowed ones run |
+| 7 | ok | within the cap | some, at least one read | `partial` | The allowed calls run; the refused ones are only recorded |
+| 8 | ok | within the cap | all | `ok` | The planned calls run |
+
+Reading every listed document is what the mode does without a usable plan: the folder is
+the scope the caller chose, so that grants nothing the caller did not. A plan made only of
+calls the gate refuses is different: it is not replaced by a wider read.
+
+Document names are text that whoever fills the folder controls, and the planning model
+reads them. They are held to plain names of at most `max_name_chars` characters and at
+most `max_documents` entries by the server and again by the gate, and the prompt tells
+the model they are data. The plan can only select which listed documents are read; it
+cannot name a tool or a path the gate does not already allow.
+
+### What comes back
+
+The answer, its citations (each with the document's SHA-256 and the `tool_calls` rows its
+text came from), `plan_status`, `documents_listed`, `documents_read`,
+`tool_server_stopped` and one `tool_calls` entry per call the gate saw. The trace prints
+one line per tool call with who asked for it (`code` or `plan`).
+
+Not measured: this mode has not been run with a live model. See "Known limits".
 
 ## Phase 2 status
 
@@ -838,7 +969,13 @@ rules and how to run it (`scripts/run_eval.py --suite openbook`) are in
 and cost. Call roles are `triage`, `answer` (route and stuffed mode), `draft`, `verify`
 and `repair` (chain mode), `embed`, `draft`, `ground` and `escalate` (openbook mode),
 `draft` and `repair` (execute mode; `draft_b` and `repair_b` are program B's calls in a
-cross-check), `interface`, `draft`, `tests` and `repair` (codetest mode). `sandbox_runs` is the audit log of execute and codetest mode, one
+cross-check), `interface`, `draft`, `tests` and `repair` (codetest mode), `plan` and the
+openbook roles (mcp mode). `tool_calls` is the audit log of mcp mode, one row per tool call
+the gate saw: `trace_id`, `seq`, `origin` (`code`, or `plan` for a call the planning model
+wrote), `tool`, the `arguments` as JSON in full (`arguments_truncated` marks the one case
+they are cut: a call refused for arguments over the cap), `status` (`ok`, `refused`,
+`error`), `error_type`, `result_bytes`, `result_sha256`, `is_error` and `duration_ms`. A
+result is stored as its size and hash only, never as text. `sandbox_runs` is the audit log of execute and codetest mode, one
 row per program run: `trace_id`, `seq`, `attempt` (`first`, `repair`), `sandbox_name`,
 `runner`, the full `program` text, `claimed_answer`, `executed_answer`, `status`,
 `error_type`, `exit_code`, capped `stdout` and `stderr` with their truncation flags,
@@ -850,7 +987,9 @@ row per program run: `trace_id`, `seq`, `attempt` (`first`, `repair`), `sandbox_
 `executed_answer`) and `program_label` (`a` or `b`, which program of a
 cross-check). Codetest mode added no column: its statuses (`tests_passed`, `tests_failed`,
 `untested`) are values of `execution_status`. The
-schema is at version 8 (version 8 adds the cross-check: `cross_check`, `cross_check_tier`,
+schema is at version 9 (version 9 adds mcp mode: the `tool_calls` table and, on `runs`,
+`plan_status`, `tool_server_stopped` and `tool_server_environment`, the names of the
+variables the documents server was given; version 8 adds the cross-check: `cross_check`, `cross_check_tier`,
 `executed_answer_b` and `cross_check_rule` on `runs`, `program_label` on `sandbox_runs`, and it
 renames the claim-based `execution_status` value `verified` to `claim_matched` in existing rows;
 version 7 adds `sandbox_runs` and, on `runs`, `execution_status`,
@@ -890,6 +1029,10 @@ output. The sha256 of the config file is stored with every run.
 | `src/inference_arbiter/execute.py` | Execute control flow, prompts, the claim-versus-output comparison and its truth table |
 | `src/inference_arbiter/codetest.py` | Codetest control flow, prompts, the interface check, reading a test run and its truth table |
 | `src/inference_arbiter/codetest_driver.py` | The fixed program that runs a solution against its tests inside the sandbox and prints one result line |
+| `src/inference_arbiter/docs_server.py` | The read-only MCP documents server of mcp mode: folder index, path rules, the two tools |
+| `src/inference_arbiter/toolgate.py` | Host-side tool gate: the allow-list, the per-call and per-reply decision tables, one record per call |
+| `src/inference_arbiter/mcp_session.py` | The stdio session to the documents server; the only module that imports `mcp` |
+| `src/inference_arbiter/mcpdocs.py` | Mcp mode control flow: listing, the tool plan and its truth table, reading, hand-over to the open-book pipeline |
 | `src/inference_arbiter/telemetry.py` | SQLite writer and schema migration |
 | `src/inference_arbiter/cli.py` | `ask` command |
 | `eval/` | Golden questions for Phase 2, the hard set, the code set with its reference tests (`eval/code_questions.yaml`, `eval/code_reference/`), the open-book set (`eval/openbook/`) and recorded scorecards (`eval/results/`) |
@@ -899,6 +1042,17 @@ output. The sha256 of the config file is stored with every run.
 
 ## Known limits
 
+- Mcp mode has not been run with a live model and has no scorecard. Everything about it
+  is covered by tests with fake model clients; the server, the gate and the stdio session
+  are also tested against the real server process. Not yet seen live: what plans the
+  `mid` tier writes, how often the gate refuses them, and what the mode adds in latency.
+  The plan schema holds a free-form `arguments` object, which a provider that enforces
+  strict JSON schemas may reject; the shipped plan tier (`mid`, through Ollama) is not
+  such a provider, but that too is unverified. The server is a host process confined by
+  its own path checks, not by the operating system. Only `.md` and `.txt` files are
+  served, HTML is not converted, and a document with a line longer than
+  `mcp_docs.max_read_bytes` is skipped. Every chosen document is read in full on every
+  run, so a large corpus means many tool calls; the large open-book corpus is out of reach.
 - Codetest mode has no scorecard yet. Its tests are written by a model: `tests_passed`
   means the solution passed them, not that it is right. Solution, tests and the driver
   share one process inside the sandbox, so the result line is protected against mistakes
