@@ -365,3 +365,40 @@ execute:
   create_timeout_s: 180
   sbx_path: sbx
   network_canary: pypi.org:443
+
+# Codetest mode (`ask --code-test`), for a question that asks for a Python function: one
+# call fixes the function's name and signature, one tier writes the module `solution`, and
+# another tier writes `unittest` tests from the question and the signature alone. The test
+# writer is never shown the solution. Both run in one throwaway `sbx` MicroVM through the
+# same gate as execute mode (src/inference_arbiter/sandbox.py, unchanged); the limits,
+# the VM size and the network canary are the ones in the `execute:` block above. The gate
+# runs one program: a fixed driver (src/inference_arbiter/codetest_driver.py) with the two
+# sources embedded as string literals. Solution, tests and driver share one process.
+# The answer is the solution with one of: `tests_passed` (every generated test passed, and
+# the same tests did not pass against a stub that raises on every call), `tests_failed`,
+# `untested` (no tests, tests that could not run or that check nothing, a run that did not
+# finish, a sandbox failure). The tests are model-written, so nothing here is `verified`.
+# Auto mode never picks this mode.
+#   interface_tier     answer tier that names the function and its signature (question only)
+#   solution_tier      answer tier that writes the solution and its one repair; --tier
+#   tests_tier         answer tier that writes the tests; --tests-tier. A free tier with a
+#                      different model from solution_tier is preferred, so one model does not
+#                      pass its own mistake. Not measured yet: `local` is the other free
+#                      model, and as program B of the cross-check it was the weaker writer.
+#                      In a three-case smoke run (2026-11-24) its tests held a wrong expected
+#                      value in every case and failed three right solutions
+#   think              Ollama only: `think` for the solution and repair calls; omit to use the
+#                      tier's own setting. The interface and tests calls use their tiers' own
+#   max_repairs        0 or 1: one rewrite of a solution that failed its tests or could not be
+#                      loaded, shown its own module and the failing tests. The tests are never
+#                      rewritten
+#   parallel           true (default): the solution and the tests are written at the same time
+#   max_program_bytes  cap on the program the gate runs (driver, solution and tests together)
+code_test:
+  interface_tier: local
+  solution_tier: mid
+  tests_tier: local
+  think: medium
+  max_repairs: 1
+  parallel: true
+  max_program_bytes: 60000

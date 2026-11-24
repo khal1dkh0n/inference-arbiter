@@ -208,6 +208,35 @@ class ExecuteConfig(BaseModel):
     network_canary: str = "pypi.org:443"
 
 
+class CodeTestConfig(BaseModel):
+    """Codetest mode: a solution and its unit tests, written apart, run in one sandbox.
+
+    The sandbox itself (time limit, output cap, VM size, sbx path, network canary) is the
+    one the `execute:` block describes; this block needs it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Tier that names the function and its signature from the question alone.
+    interface_tier: str = "local"
+    # Answer tier that writes the solution and its one repair. --tier overrides it.
+    solution_tier: str = "mid"
+    # Answer tier that writes the tests, from the question and the interface only. A
+    # different model from solution_tier is preferred, so that one model does not pass
+    # its own mistake. --tests-tier overrides it.
+    tests_tier: str = "local"
+    # Ollama only: `think` for the solution and repair calls. Unset: the tier's own setting.
+    think: bool | Literal["low", "medium", "high"] | None = None
+    # Repairs of a solution that failed its tests or could not be loaded. The tests are
+    # never repaired.
+    max_repairs: int = Field(default=1, ge=0, le=1)
+    # Write the solution and the tests at the same time. Neither call sees the other.
+    parallel: bool = True
+    # The program the gate runs holds the driver, the solution and the tests, so this is
+    # larger than execute.max_program_bytes.
+    max_program_bytes: int = Field(default=60_000, gt=0)
+
+
 class HarnessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -228,6 +257,8 @@ class HarnessConfig(BaseModel):
     auto: AutoConfig = Field(default_factory=AutoConfig)
     # Optional. Without it execute mode is not available.
     execute: ExecuteConfig | None = None
+    # Optional. Without it codetest mode is not available. Needs the execute block.
+    code_test: CodeTestConfig | None = None
 
     # Set by load_config; not part of the YAML.
     sha256: str = ""
@@ -325,6 +356,13 @@ class HarnessConfig(BaseModel):
             )
         if self.auto.computation_check and self.execute is None:
             raise ValueError("auto.computation_check needs an `execute:` block in the config")
+        if self.code_test is not None:
+            if self.execute is None:
+                raise ValueError("code_test needs an `execute:` block in the config: it describes the sandbox")
+            for key in ("interface_tier", "solution_tier", "tests_tier"):
+                tier_name = getattr(self.code_test, key)
+                if tier_name not in answer_tiers:
+                    raise ValueError(f"code_test.{key} '{tier_name}' is not an answer tier")
         return self
 
     def auto_closed_book_tier(self) -> str:

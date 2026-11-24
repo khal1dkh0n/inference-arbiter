@@ -11,6 +11,7 @@ from inference_arbiter.config import DEFAULT_CONFIG_PATH, ConfigError
 from inference_arbiter.router import (
     DEFAULT_DB_PATH,
     ChainNotConfiguredError,
+    CodeTestNotConfiguredError,
     ExecuteNotConfiguredError,
     OpenbookNotConfiguredError,
     UnknownTierError,
@@ -35,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
             "auto.closed_book_tier; sources that fit the context window, one stuffed call; sources "
             "that do not fit, the grounded pipeline with citations. With the computation check on, "
             "a question without sources that a short program can compute goes to execute mode. "
-            "--route, --chain, --stuffed, --require-citations and --execute pick explicitly."
+            "--route, --chain, --stuffed, --require-citations, --execute and --code-test pick explicitly."
         ),
     )
     ask.add_argument("question", help="the question text")
@@ -81,6 +82,21 @@ def build_parser() -> argparse.ArgumentParser:
             "the tier that writes the second program (implies --cross-check); default "
             "execute.cross_check_tier, else the tier that writes the first"
         ),
+    )
+    ask.add_argument(
+        "--code-test",
+        action="store_true",
+        help=(
+            "codetest mode, for a question that asks for a Python function: one call fixes the "
+            "function's interface, one tier writes the solution and another writes unittest tests "
+            "from the question alone, without seeing the solution; both run in one isolated sbx "
+            "sandbox and the answer says whether the solution passed its generated tests"
+        ),
+    )
+    ask.add_argument(
+        "--tests-tier",
+        metavar="TIER",
+        help="with --code-test (implied): the tier that writes the tests; default code_test.tests_tier",
     )
     ask.add_argument(
         "--computation-check",
@@ -225,6 +241,27 @@ def format_trace(result: RunResult) -> str:
             lines.append(run_line)
         if result.repair_error_type:
             lines.append(f"repair        failed ({result.repair_error_type})")
+    if result.mode == "codetest":
+        counts = "no test result"
+        if result.tests_run is not None:
+            counts = f"{result.tests_run - result.tests_failed} of {result.tests_run} tests passed"
+        lines.append(
+            f"tests         {result.execution_status}, {counts}, function {result.code_function or '-'}, "
+            f"tests written by {result.tests_tier}, repaired: {result.repaired}, "
+            f"first run: {result.code_first_outcome or 'none'}"
+        )
+        for run in result.sandbox_runs:
+            run_line = (
+                f"sandbox {run.seq}     {run.attempt:<6} {run.sandbox_name or '-'} {run.outcome}, "
+                f"exit {run.exit_code}, run {run.duration_ms:.0f} ms, total {run.total_ms:.0f} ms, "
+                f"network {run.network_policy}, env {','.join(run.environment_names)}, "
+                f"removed: {run.sandbox_removed}"
+            )
+            if run.error_type:
+                run_line += f"  [{run.error_type}]"
+            lines.append(run_line)
+        if result.repair_error_type:
+            lines.append(f"repair        failed ({result.repair_error_type})")
     if result.mode == "route" and result.execution_status == "failed":
         lines.append("execution     failed; the answer is one closed-book call, NOT VERIFIED")
         if result.execution_note:
@@ -281,6 +318,8 @@ def format_citations(result: RunResult) -> str:
 
 def _mode_from_arguments(arguments: argparse.Namespace) -> str:
     """Explicit flags win; anything else is auto."""
+    if arguments.code_test or arguments.tests_tier:
+        return "codetest"
     if arguments.execute or arguments.cross_check or arguments.cross_check_tier:
         return "execute"
     if arguments.stuffed:
@@ -326,6 +365,17 @@ def run_ask(arguments: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if (arguments.code_test or arguments.tests_tier) and (
+        arguments.execute or arguments.cross_check or arguments.cross_check_tier
+        or arguments.chain or arguments.route or arguments.stuffed or arguments.sources
+        or arguments.triage_tier or arguments.verifier_tier
+    ):
+        print(
+            "error: --code-test cannot be combined with --execute, --cross-check, --chain, --route, "
+            "--stuffed, --sources, --triage-tier or --verifier-tier",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if arguments.computation_check and arguments.no_computation_check:
         print("error: --computation-check and --no-computation-check cannot be combined", file=sys.stderr)
         return EXIT_USAGE
@@ -349,6 +399,7 @@ def run_ask(arguments: argparse.Namespace) -> int:
             cross_check=True if arguments.cross_check else None,
             cross_check_tier=arguments.cross_check_tier,
             computation_check=_computation_check_from_arguments(arguments),
+            tests_tier=arguments.tests_tier,
         )
         result = harness.answer(request)
     except (
@@ -357,6 +408,7 @@ def run_ask(arguments: argparse.Namespace) -> int:
         ChainNotConfiguredError,
         OpenbookNotConfiguredError,
         ExecuteNotConfiguredError,
+        CodeTestNotConfiguredError,
     ) as usage_error:
         print(f"error: {usage_error}", file=sys.stderr)
         return EXIT_USAGE

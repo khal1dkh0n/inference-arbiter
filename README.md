@@ -10,7 +10,10 @@ flag: `--route` (a small local model triages the question and picks a tier), `--
 `--require-citations` (always the grounded pipeline: every quote checked in code and
 each claim judged against the passage it cites) and `--execute` (the model writes a short
 Python program, an isolated `sbx` MicroVM runs it, and code compares the output with the
-answer the model claimed, when it claimed one). Governing specs: `inference_arbiter_architecture_build_plan.md` and
+answer the model claimed, when it claimed one) and `--code-test` (for a question that asks
+for a Python function: a solution and unit tests are written by separate calls, the test
+writer never sees the solution, both run in one sandbox and the answer says whether the
+solution passed its generated tests). Governing specs: `inference_arbiter_architecture_build_plan.md` and
 `inference_arbiter_thread_discussion_summary.md`.
 
 ## Setup
@@ -666,6 +669,126 @@ questions outside arithmetic and code tracing. Latency p50 was 8.1 s for
 `execute:mid` against 2.9 s for `tier:mid`; the 12 sandbox runs averaged 3.1 s each and
 all 12 sandboxes were removed.
 
+## Codetest mode
+
+```bash
+uv run python -m inference_arbiter ask "Write a Python function to_minor_units(amount: str, exponent: int) -> int that converts a decimal amount string to minor units, rounding half to even." --code-test
+```
+
+Codetest mode is opt-in, for a question that asks for a Python function. It needs the
+`sbx` CLI and the `execute:` block (the sandbox limits) as well as its own `code_test:`
+block. Auto mode never picks it. Plain control flow in
+`src/inference_arbiter/codetest.py`, with a fixed ceiling of four model calls and two
+sandbox runs and no triage call:
+
+| Step | What happens | On failure |
+| --- | --- | --- |
+| 1. Interface | `code_test.interface_tier` (`local`) gets the question and returns a typed `CodeInterface`: the function's name and its `def` line. `codetest.check_interface` checks it in code: it must parse as one plain function definition with that name, and when the question itself holds a `def name(` line the name must be that one. The module name is fixed: `solution` | The run fails (`interface_invalid`, `interface_mismatch` or the call's error). Nothing else is called |
+| 2. Solution | `code_test.solution_tier` (`mid`, or `--tier`) gets the question and the interface and returns the module | The run fails: there is nothing to return |
+| 3. Tests | `code_test.tests_tier` (`local`, or `--tests-tier`) gets the question and the interface and returns a `unittest` module. It is not shown the solution | The solution is returned as `untested` |
+| 4. Run | One sandbox run of both, through the dispatch gate above, unchanged | A typed gate error, or a run class (below) |
+| 5. Decide | The truth table in `codetest.decide` | - |
+| 6. Repair | Only when the tests failed the solution or the solution could not be loaded: the solution tier gets its own module and what happened, once, and the new module runs once against the same tests. The tests are never rewritten | The first result stands; `repair_error_type` is set |
+
+Steps 2 and 3 run at the same time by default (`code_test.parallel`); neither is an input
+of the other.
+
+**Independent tests.** The test writer's whole prompt is the system prompt, the question
+and the interface (`codetest.build_tests_messages`, a function with no parameter that
+could carry a solution). Nothing of the solution, of its run or of its repair is passed to
+any call on the tests tier. `tests/test_codetest.py` plants a marker in every field of
+the solution drafts and in the sandbox output, runs every path including both repairs,
+and asserts that the marker never reaches the test writer or the interface call; a second
+test swaps in a builder that leaks and shows the check fails. The shipped config writes
+the solution and the tests on two different free models, so one model does not pass its
+own mistake; `--tests-tier` picks another. Both writers do share one thing by design: the
+interface, which comes from the question alone.
+
+**One program for the gate.** The gate runs one program and stages nothing else, and it
+is not changed for this mode. The program is a fixed driver
+(`src/inference_arbiter/codetest_driver.py`, standard library only, never written by a
+model) with the solution and the tests embedded as string literals. It loads the solution
+as the module `solution`, loads the tests, runs them with `unittest`, and prints one
+result line with the counts. The exit code alone is never trusted: a run passes only when
+the exit code is 0 and the result line says every test passed
+(`codetest.classify_test_run`), so a solution that ends the process early is "not
+finished", not a pass. Whatever the solution and the tests print is captured inside the
+driver and cannot reach the result line.
+
+Solution, tests and driver run in **one process**. That is safe for the host (the whole
+process is inside the sandbox) but it is not a barrier between the three: code that set
+out to forge the result line or to patch `unittest` could do it. The mode guards against
+mistakes, not against a solution written to cheat its own tests.
+
+**Tests that check nothing.** When every test passes, the driver runs the same tests once
+more against a stub: a copy of the solution module whose function raises on every call.
+Tests that pass against the stub too do not depend on what the function returns, and the
+result is `untested`, not `tests_passed`.
+
+How one sandbox run is classed (`codetest.classify_test_run`, first match wins):
+
+| # | What came back | Class |
+| --- | --- | --- |
+| 1 | A gate or sandbox error | `infra_failed` |
+| 2 | Timeout, or output over the cap | `not_finished` |
+| 3 | No well-formed result line, or an exit code that does not match it | `not_finished` |
+| 4 | The solution did not load, or lacks the function | `solution_invalid` |
+| 5 | The tests did not load, the run was cut short, or no test ran | `tests_invalid` |
+| 6 | At least one test failed or raised | `tests_failed` |
+| 7 | Every test passed, and passed against the stub too | `vacuous` |
+| 8 | Every test passed, and the stub run did not | `passed` |
+
+The decision table (`codetest.decide`, tested for all 126 combinations of first run,
+repair and repairs allowed):
+
+| # | First run | Repair | Result |
+| --- | --- | --- | --- |
+| 1 | passed | - | `tests_passed`, the first solution |
+| 2 | vacuous, tests_invalid, not_finished, infra_failed | - | `untested`, the first solution. No repair: nothing here is the solution's proven fault |
+| 3 | tests_failed or solution_invalid | not attempted, allowed | Attempt the one repair |
+| 4 | tests_failed | not attempted, not allowed | `tests_failed`, the first solution |
+| 5 | solution_invalid | not attempted, not allowed | `failed`: no answer, the run is an error |
+| 6 | either | passed | `tests_passed`, the repaired solution |
+| 7 | either | tests_failed | `tests_failed`, the repaired solution |
+| 8 | either | vacuous | `untested`, the repaired solution |
+| 9 | tests_failed | anything else | `tests_failed`, the first solution: it is the one known to run |
+| 10 | solution_invalid | tests_invalid, not_finished, infra_failed | `untested`, the repaired solution |
+| 11 | solution_invalid | solution_invalid, or the repair call failed | `failed`: no answer, the run is an error (`solution_invalid`) |
+
+What the answer says. The answer is a note followed by the solution in one code fence:
+
+| `execution_status` | The note begins |
+| --- | --- |
+| `tests_passed` | "Passed its generated tests: N of N unit tests, written by tier T, model M from the question alone, passed in an isolated sandbox. The tests were written by a model and were not checked against a reference, so this does not show the solution is correct." |
+| `tests_failed` | "FAILED its generated tests: K of N unit tests ... failed in an isolated sandbox (the failing tests). ... a failure can be a wrong test as well as a wrong solution." |
+| `untested` | "NOT TESTED: (why). The solution below was not run against any test that could fail it." |
+
+`tests_passed` is never called verified. `verified` keeps its one meaning, two
+independently written programs printing the same value in a cross-check. Passing tests
+that a model wrote from the question are evidence that the solution does what that model
+understood the question to ask, and no more: both writers can misread the question the
+same way, and the tests can be too weak to see a bug. How often that happens is what the
+code set measures (`eval/README.md`, "Code set"): there, a solution is graded by fixed
+reference tests that no model sees, and the report counts how often the generated tests
+caught and missed a solution the reference tests failed.
+
+The run row stores `mode` `codetest` and the status in `execution_status`; the result
+also carries `code_function`, `code_signature`, `code_solution`, `code_first_solution`,
+`code_tests`, `tests_tier`, `tests_run`, `tests_failed` and `code_first_outcome` (how the
+first solution's run was classed, kept apart from the repaired one's). Each sandbox run
+is a `sandbox_runs` row whose `program` is the whole program the gate ran and whose
+`executed_answer` is the result line.
+
+Not measured yet: no scorecard exists for this mode. `code_test.tests_tier: local`
+follows the two-model preference and is a guess about quality; in the cross-check the
+same local model was the weaker program writer. A first smoke run of three code-set cases
+(CQ-01, CQ-12, CQ-17, 2026-11-24, `codetest:mid+local`, one run each, 0 USD) proved the
+path end to end and points the same way: all three solutions passed the reference tests,
+and all three were reported `tests_failed`, because the generated tests held a wrong
+expected value in each case (the same tests fail the reference solution). Three cases
+decide nothing; the full run on the code set with `codetest:mid+local` against
+`codetest:mid+mid` and `tier:mid` is still to do.
+
 ## Phase 2 status
 
 The build plan's exit test is scorecard data proving the multi-model chain beats, or
@@ -715,15 +838,18 @@ rules and how to run it (`scripts/run_eval.py --suite openbook`) are in
 and cost. Call roles are `triage`, `answer` (route and stuffed mode), `draft`, `verify`
 and `repair` (chain mode), `embed`, `draft`, `ground` and `escalate` (openbook mode),
 `draft` and `repair` (execute mode; `draft_b` and `repair_b` are program B's calls in a
-cross-check). `sandbox_runs` is the audit log of execute mode, one
+cross-check), `interface`, `draft`, `tests` and `repair` (codetest mode). `sandbox_runs` is the audit log of execute and codetest mode, one
 row per program run: `trace_id`, `seq`, `attempt` (`first`, `repair`), `sandbox_name`,
 `runner`, the full `program` text, `claimed_answer`, `executed_answer`, `status`,
 `error_type`, `exit_code`, capped `stdout` and `stderr` with their truncation flags,
 `duration_ms` (the program), `total_ms` (create to remove), `timed_out`, `network_policy`,
 `environment_names` (names only; the values are fixed in code), `sandbox_removed` and
 `outcome` (`agree`, `disagree`, `no_claim`, `program_failed`, `infra_failed`; in a cross-check
-`ran`, `program_failed`, `infra_failed`) and `program_label` (`a` or `b`, which program of a
-cross-check). The
+`ran`, `program_failed`, `infra_failed`; in codetest mode `passed`, `vacuous`, `tests_failed`,
+`solution_invalid`, `tests_invalid`, `not_finished`, `infra_failed`, with the run's result line in
+`executed_answer`) and `program_label` (`a` or `b`, which program of a
+cross-check). Codetest mode added no column: its statuses (`tests_passed`, `tests_failed`,
+`untested`) are values of `execution_status`. The
 schema is at version 8 (version 8 adds the cross-check: `cross_check`, `cross_check_tier`,
 `executed_answer_b` and `cross_check_rule` on `runs`, `program_label` on `sandbox_runs`, and it
 renames the claim-based `execution_status` value `verified` to `claim_matched` in existing rows;
@@ -748,7 +874,7 @@ output. The sha256 of the config file is stored with every run.
 | Path | Role |
 | --- | --- |
 | `src/inference_arbiter/config.py` | YAML loading, pydantic validation, `.env` loader, config hash |
-| `src/inference_arbiter/schemas.py` | `AskRequest`, `TriageDecision`, `ComputationCheckDecision`, `DraftAnswer`, `VerifierVerdict`, `OpenbookDraft`, `Citation`, `CallResult`, `RunResult` |
+| `src/inference_arbiter/schemas.py` | `AskRequest`, `TriageDecision`, `ComputationCheckDecision`, `DraftAnswer`, `VerifierVerdict`, `OpenbookDraft`, `ExecuteDraft`, `CodeInterface`, `SolutionDraft`, `UnitTestsDraft`, `Citation`, `CallResult`, `RunResult` |
 | `src/inference_arbiter/clients.py` | `OllamaNativeClient` (native `/api/chat` and `/api/embed`), `OpenRouterClient` (`openai` SDK), `OpenRouterDecisionsClient` |
 | `src/inference_arbiter/triage.py` | Text-only triage call and output validation |
 | `src/inference_arbiter/auto.py` | Auto mode's decision table: which strategy answers when the caller did not pick one |
@@ -762,15 +888,24 @@ output. The sha256 of the config file is stored with every run.
 | `src/inference_arbiter/openbook.py` | Openbook control flow, draft prompt, stuffed baseline |
 | `src/inference_arbiter/sandbox.py` | Host-side dispatch gate: runs one Python program in a throwaway `sbx` MicroVM and removes it |
 | `src/inference_arbiter/execute.py` | Execute control flow, prompts, the claim-versus-output comparison and its truth table |
+| `src/inference_arbiter/codetest.py` | Codetest control flow, prompts, the interface check, reading a test run and its truth table |
+| `src/inference_arbiter/codetest_driver.py` | The fixed program that runs a solution against its tests inside the sandbox and prints one result line |
 | `src/inference_arbiter/telemetry.py` | SQLite writer and schema migration |
 | `src/inference_arbiter/cli.py` | `ask` command |
-| `eval/` | Golden questions for Phase 2, the open-book set (`eval/openbook/`) and recorded scorecards (`eval/results/`) |
-| `scripts/run_eval.py` | Eval runner and scorecard for both suites |
+| `eval/` | Golden questions for Phase 2, the hard set, the code set with its reference tests (`eval/code_questions.yaml`, `eval/code_reference/`), the open-book set (`eval/openbook/`) and recorded scorecards (`eval/results/`) |
+| `scripts/run_eval.py` | Eval runner and scorecard for both suites; grades the code set with reference tests in the sandbox |
 | `scripts/check_computation.py` | Scores the computation check alone against the `computable` labels of the question files |
 | `scripts/fetch_corpus.py` | Fetches and verifies the open-book corpus against `eval/openbook/corpus.yaml` |
 
 ## Known limits
 
+- Codetest mode has no scorecard yet. Its tests are written by a model: `tests_passed`
+  means the solution passed them, not that it is right. Solution, tests and the driver
+  share one process inside the sandbox, so the result line is protected against mistakes
+  (stray output, an early exit, a crash) and not against a solution written to forge it.
+  A test run that does not finish is reported as not tested, without saying whether the
+  solution or the tests ran too long. Python only, standard library only, one function
+  per question.
 - Openbook mode has been run live with the `mid` drafter, local embeddings and both
   grounding verifiers (`ground_chat`, and `ground_jev` on the 26-case open-book set on
   2026-11-22). On that set Jev's verdicts matched the local verifier's: 20 grounded, 6

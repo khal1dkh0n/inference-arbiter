@@ -1,0 +1,507 @@
+# Code question set, v1 (20 cases). Schema, grading and rules: eval/README.md, "Code set".
+# Every case asks for one Python function with a stated signature. An answer is graded by running
+# its code against the reference tests named in `match.tests`, in the sandbox. The reference
+# files under eval/code_reference/ are never part of a prompt.
+version: 1
+cases:
+  - id: CQ-01
+    question: |
+      Write a Python function with this signature:
+
+      def luhn_check_digit(payload: str) -> int
+
+      It returns the Luhn check digit for `payload`, which is the number without its check digit. The check digit is the one digit that, appended to the payload, makes the full number pass the Luhn check: starting from the rightmost digit of the full number and moving left, every second digit is doubled, 9 is subtracted from any doubled value above 9, and the sum of all the digits is a multiple of 10.
+
+      `payload` must be a non-empty string of the ASCII digits 0-9. Raise ValueError for anything else: an empty string, spaces, a sign, letters.
+    expected_answer: "A module whose function luhn_check_digit passes eval/code_reference/CQ-01_tests.py."
+    match:
+      type: reference_tests
+      function: luhn_check_digit
+      tests: eval/code_reference/CQ-01_tests.py
+    category: encoding
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-01.py
+    broken_solutions:
+      - eval/code_reference/CQ-01_broken_1.py
+      - eval/code_reference/CQ-01_broken_2.py
+    notes: "Doubling starts at the payload's last digit, because the check digit takes the rightmost place. Expected values from the reference solution; 7992739871 -> 3 and 411111111111111 -> 1 are the usual published examples."
+
+  - id: CQ-02
+    question: |
+      Write a Python function with this signature:
+
+      def parse_tlv(data: bytes) -> list[tuple[str, bytes]]
+
+      It parses a sequence of BER-TLV objects and returns one (tag, value) pair per object, in order, with the tag as an uppercase hex string. Parse the top level only: do not descend into the value of any object.
+
+      Rules:
+      - Tag: the first byte starts the tag. If its low five bits are all ones (byte & 0x1F == 0x1F), the tag continues: every following byte belongs to the tag, and the last tag byte is the first one whose top bit (0x80) is clear.
+      - Length: a first length byte below 0x80 is the length itself. 0x81 means the next one byte is the length. 0x82 means the next two bytes are the length, big-endian. Any other first length byte raises ValueError.
+      - A 0x00 byte where a tag would start is padding and is skipped.
+      - Raise ValueError when the data ends inside a tag, a length or a value.
+      - Empty data returns an empty list.
+    expected_answer: "A module whose function parse_tlv passes eval/code_reference/CQ-02_tests.py."
+    match:
+      type: reference_tests
+      function: parse_tlv
+      tests: eval/code_reference/CQ-02_tests.py
+    category: parsing
+    expected_route: mid
+    difficulty: hard
+    reference_solution: eval/code_reference/CQ-02.py
+    broken_solutions:
+      - eval/code_reference/CQ-02_broken_1.py
+      - eval/code_reference/CQ-02_broken_2.py
+    notes: "Multi-byte tags, the two long length forms, padding and truncation. The rules are stated in the question; they follow BER as used by EMV."
+
+  - id: CQ-03
+    question: |
+      Write a Python function with this signature:
+
+      def to_minor_units(amount: str, exponent: int) -> int
+
+      It converts a decimal amount, given as a string, to an integer number of minor units for a currency with `exponent` decimal places (2 for cents, 0 for a currency without minor units, 3 for thousandths). When the amount has more decimal places than the currency, round half to even (banker's rounding). The result must be exact: do not go through binary floating point.
+
+      Format of `amount`: an optional leading "-", one or more ASCII digits, then optionally a "." followed by one or more ASCII digits. Examples: "12", "12.5", "-0.125". Raise ValueError for anything else, for example "", "1.", ".5", "1,5", " 1", "+1", "1e2".
+
+      `exponent` must be between 0 and 4 inclusive; raise ValueError otherwise. A negative zero result is 0.
+    expected_answer: "A module whose function to_minor_units passes eval/code_reference/CQ-03_tests.py."
+    match:
+      type: reference_tests
+      function: to_minor_units
+      tests: eval/code_reference/CQ-03_tests.py
+    category: numeric
+    expected_route: mid
+    difficulty: hard
+    reference_solution: eval/code_reference/CQ-03.py
+    broken_solutions:
+      - eval/code_reference/CQ-03_broken_1.py
+      - eval/code_reference/CQ-03_broken_2.py
+    notes: "Half-even on the decimal value. 0.575 with exponent 2 is 58 exactly and 57 through a float, and 90071992547409.93 does not fit a float at all; 0.285 is 28 and 0.295 is 30."
+
+  - id: CQ-04
+    question: |
+      Write a Python function with this signature:
+
+      def crc16(data: bytes) -> int
+
+      It returns the CRC-16/CCITT-FALSE checksum of `data` as an integer from 0 to 0xFFFF. Parameters: polynomial 0x1021, initial value 0xFFFF, no reflection of input or output, no final XOR.
+
+      For each byte: XOR the byte into the high byte of the 16-bit register, then repeat eight times: if the top bit of the register is set, shift the register left by one and XOR it with 0x1021, otherwise only shift it left by one. Keep the register to 16 bits. The checksum of empty data is the initial value.
+    expected_answer: "A module whose function crc16 passes eval/code_reference/CQ-04_tests.py."
+    match:
+      type: reference_tests
+      function: crc16
+      tests: eval/code_reference/CQ-04_tests.py
+    category: encoding
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-04.py
+    broken_solutions:
+      - eval/code_reference/CQ-04_broken_1.py
+      - eval/code_reference/CQ-04_broken_2.py
+    notes: "0x29B1 for b'123456789' is the catalogue check value of CRC-16/CCITT-FALSE. The 256-byte value comes from the reference solution."
+
+  - id: CQ-05
+    question: |
+      Write a Python function with this signature:
+
+      def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]
+
+      Each interval is a pair (start, end) of integers and covers every integer from start to end inclusive. The input is in no particular order. Merge all intervals that overlap or are adjacent: two intervals are adjacent when one ends at n and the other starts at n + 1. Return the merged intervals as tuples, sorted by start.
+
+      Raise ValueError if any interval has start greater than end. An empty list returns an empty list. Do not modify the input list.
+    expected_answer: "A module whose function merge_intervals passes eval/code_reference/CQ-05_tests.py."
+    match:
+      type: reference_tests
+      function: merge_intervals
+      tests: eval/code_reference/CQ-05_tests.py
+    category: sequence
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-05.py
+    broken_solutions:
+      - eval/code_reference/CQ-05_broken_1.py
+      - eval/code_reference/CQ-05_broken_2.py
+    notes: "Closed integer intervals, so (1, 2) and (3, 4) merge and (1, 2) and (4, 5) do not."
+
+  - id: CQ-06
+    question: |
+      Write a Python function with this signature:
+
+      def is_valid_iban(iban: str) -> bool
+
+      It checks an IBAN by these rules and returns True or False. It never raises for a string argument.
+
+      1. Remove every space character, then convert to uppercase.
+      2. The result must be 15 to 34 characters long and contain only the letters A-Z and the digits 0-9. Its first two characters must be letters and its third and fourth characters must be digits. Otherwise return False.
+      3. Move the first four characters to the end.
+      4. Replace every letter by two digits: A is 10, B is 11, and so on up to Z, which is 35.
+      5. Read the result as one decimal integer. The IBAN is valid when that integer modulo 97 equals 1.
+
+      Do not check country codes or country-specific lengths.
+    expected_answer: "A module whose function is_valid_iban passes eval/code_reference/CQ-06_tests.py."
+    match:
+      type: reference_tests
+      function: is_valid_iban
+      tests: eval/code_reference/CQ-06_tests.py
+    category: rules
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-06.py
+    broken_solutions:
+      - eval/code_reference/CQ-06_broken_1.py
+      - eval/code_reference/CQ-06_broken_2.py
+    notes: "The mod-97 rule only, stated in full in the question. The valid examples are the usual published sample IBANs."
+
+  - id: CQ-07
+    question: |
+      Write a Python module that imports `datetime` and defines a function with this signature:
+
+      def add_business_days(start: datetime.date, days: int, holidays: set[datetime.date]) -> datetime.date
+
+      A business day is a Monday to Friday that is not in `holidays`. The function returns the date of the `days`-th business day strictly after `start`. `start` itself is never counted, whether or not it is a business day.
+
+      When `days` is 0, return `start` unchanged, even if it is not a business day. Raise ValueError when `days` is negative.
+    expected_answer: "A module whose function add_business_days passes eval/code_reference/CQ-07_tests.py."
+    match:
+      type: reference_tests
+      function: add_business_days
+      tests: eval/code_reference/CQ-07_tests.py
+    category: rules
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-07.py
+    broken_solutions:
+      - eval/code_reference/CQ-07_broken_1.py
+      - eval/code_reference/CQ-07_broken_2.py
+    notes: "Counting starts the day after `start`. 2026-01-02 is a Friday; the test file asserts the weekdays it relies on."
+
+  - id: CQ-08
+    question: |
+      Write a Python function with this signature:
+
+      def bitmap_fields(bitmap_hex: str) -> list[int]
+
+      `bitmap_hex` is an ISO 8583 bitmap written as hexadecimal characters, upper or lower case. The primary bitmap is 16 hex characters (64 bits). Bit 1 is the most significant bit of the first byte, bit 8 the least significant bit of the first byte, bit 9 the most significant bit of the second byte, and so on. Bit n set means field n is present.
+
+      When bit 1 is set, a secondary bitmap of another 16 hex characters must follow directly, and it covers fields 65 to 128 in the same way. When bit 1 is clear there must be no secondary bitmap.
+
+      Return the numbers of the fields that are present, in ascending order, without field 1 itself. Raise ValueError when the string contains a character that is not a hex digit, when bit 1 is clear and the length is not 16, or when bit 1 is set and the length is not 32.
+    expected_answer: "A module whose function bitmap_fields passes eval/code_reference/CQ-08_tests.py."
+    match:
+      type: reference_tests
+      function: bitmap_fields
+      tests: eval/code_reference/CQ-08_tests.py
+    category: parsing
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-08.py
+    broken_solutions:
+      - eval/code_reference/CQ-08_broken_1.py
+      - eval/code_reference/CQ-08_broken_2.py
+    notes: "Bit numbering from the most significant bit; the secondary bitmap is required exactly when bit 1 is set. The 20-field example was decoded by hand, byte by byte."
+
+  - id: CQ-09
+    question: |
+      Write a Python function with this signature:
+
+      def roman_to_int(text: str) -> int
+
+      It converts a Roman numeral to an integer. Only the canonical numerals of the numbers 1 to 3999 are accepted, written with the uppercase letters I, V, X, L, C, D, M. Canonical means the one standard way to write the number: the subtractive pairs IV, IX, XL, XC, CD and CM are used wherever they apply and nowhere else, so 4 is "IV" and not "IIII", 99 is "XCIX" and not "IC", and 1990 is "MCMXC".
+
+      Raise ValueError for any string that is not the canonical numeral of a number from 1 to 3999. That includes the empty string, lowercase letters, other characters, and non-canonical forms such as "IIII", "VV", "IC", "XM", "IVI" and "MMMM".
+    expected_answer: "A module whose function roman_to_int passes eval/code_reference/CQ-09_tests.py."
+    match:
+      type: reference_tests
+      function: roman_to_int
+      tests: eval/code_reference/CQ-09_tests.py
+    category: parsing
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-09.py
+    broken_solutions:
+      - eval/code_reference/CQ-09_broken_1.py
+      - eval/code_reference/CQ-09_broken_2.py
+    notes: "Strict: the hard part is rejecting non-canonical forms, not the conversion."
+
+  - id: CQ-10
+    question: |
+      Write a Python function with this signature:
+
+      def top_k_words(text: str, k: int) -> list[tuple[str, int]]
+
+      A word is a maximal run of the ASCII letters a-z and A-Z; every other character separates words. Words are compared without regard to case and are returned in lowercase.
+
+      Return the `k` most frequent words as (word, count) tuples, ordered by count from highest to lowest; words with the same count are ordered alphabetically. When the text has fewer than `k` different words, return all of them. When `k` is zero or negative, return an empty list.
+    expected_answer: "A module whose function top_k_words passes eval/code_reference/CQ-10_tests.py."
+    match:
+      type: reference_tests
+      function: top_k_words
+      tests: eval/code_reference/CQ-10_tests.py
+    category: sequence
+    expected_route: mid
+    difficulty: easy
+    reference_solution: eval/code_reference/CQ-10.py
+    broken_solutions:
+      - eval/code_reference/CQ-10_broken_1.py
+      - eval/code_reference/CQ-10_broken_2.py
+    notes: "Tie order and the negative k case are where a quick solution goes wrong (a negative slice bound drops words from the end)."
+
+  - id: CQ-11
+    question: |
+      Write a Python function with this signature:
+
+      def eval_rpn(tokens: list[str]) -> int
+
+      It evaluates an integer expression in reverse Polish notation. Each token is either an integer (an optional leading "-" followed by one or more ASCII digits) or one of the operators "+", "-", "*", "/". An operator takes the two most recent values: for the tokens a, b, "-" the result is a - b, and for a, b, "/" it is a divided by b.
+
+      Division is integer division that truncates toward zero, so -7 divided by 2 is -3. Results must be exact for integers of any size.
+
+      Raise ZeroDivisionError on division by zero. Raise ValueError when the expression is malformed: an empty token list, a token that is neither an integer nor an operator, an operator with fewer than two values available, or more than one value left at the end.
+    expected_answer: "A module whose function eval_rpn passes eval/code_reference/CQ-11_tests.py."
+    match:
+      type: reference_tests
+      function: eval_rpn
+      tests: eval/code_reference/CQ-11_tests.py
+    category: numeric
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-11.py
+    broken_solutions:
+      - eval/code_reference/CQ-11_broken_1.py
+      - eval/code_reference/CQ-11_broken_2.py
+    notes: "Truncating division on negative operands, exact for big integers (int(a / b) is not), and the malformed cases."
+
+  - id: CQ-12
+    question: |
+      Write a Python function with this signature:
+
+      def normalize_path(path: str) -> str
+
+      It normalises a POSIX-style path by text alone, without touching the file system and without using os.path or pathlib.
+
+      Rules:
+      - Split the path on "/". Empty segments and "." segments are dropped.
+      - A ".." segment removes the segment before it, when there is one and it is not itself "..".
+      - In an absolute path (one that starts with "/"), a ".." with nothing before it is dropped: the root has no parent.
+      - In a relative path, a ".." with nothing to remove is kept.
+      - An absolute result is "/" followed by the remaining segments joined with "/", or just "/" when none remain.
+      - A relative result is the remaining segments joined with "/", or "." when none remain.
+      - The result never ends with "/" unless it is the root itself. The empty string gives ".".
+    expected_answer: "A module whose function normalize_path passes eval/code_reference/CQ-12_tests.py."
+    match:
+      type: reference_tests
+      function: normalize_path
+      tests: eval/code_reference/CQ-12_tests.py
+    category: parsing
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-12.py
+    broken_solutions:
+      - eval/code_reference/CQ-12_broken_1.py
+      - eval/code_reference/CQ-12_broken_2.py
+    notes: "The relative-path cases (leading .. kept, empty result is '.') are the ones a quick stack solution drops."
+
+  - id: CQ-13
+    question: |
+      Write a Python function with this signature:
+
+      def allocate(total: int, weights: list[int]) -> list[int]
+
+      It splits `total`, a non-negative integer number of minor units, across the given integer weights by the largest remainder method, and returns one share per weight, in order:
+
+      1. Each share starts as the floor of total * weight / sum(weights).
+      2. The units still left over are handed out one at a time to the shares with the largest remainders, where a share's remainder is (total * weight) modulo sum(weights). When remainders are equal, the share with the lower index comes first.
+
+      The shares always add up to `total`. Use exact integer arithmetic. Raise ValueError when `total` is negative, when `weights` is empty, when any weight is negative, or when the weights add up to zero.
+    expected_answer: "A module whose function allocate passes eval/code_reference/CQ-13_tests.py."
+    match:
+      type: reference_tests
+      function: allocate
+      tests: eval/code_reference/CQ-13_tests.py
+    category: numeric
+    expected_route: mid
+    difficulty: hard
+    reference_solution: eval/code_reference/CQ-13.py
+    broken_solutions:
+      - eval/code_reference/CQ-13_broken_1.py
+      - eval/code_reference/CQ-13_broken_2.py
+    notes: "Largest remainder with the tie rule stated. 1000 over [3,3,3,1,7,11] was worked by hand: floors 107,107,107,35,250,392 leave 2 units, remainders 4,4,4,20,0,24, so index 5 and index 3 get one each."
+
+  - id: CQ-14
+    question: |
+      Write a Python function with this signature:
+
+      def mask_pan(pan: str) -> str
+
+      `pan` is a card number that may contain separators: spaces and hyphens. It must contain between 13 and 19 ASCII digits and no characters other than digits, spaces and hyphens; raise ValueError otherwise.
+
+      Return the string with every separator left where it is, the first six digits and the last four digits unchanged, and every digit between them replaced by "*".
+    expected_answer: "A module whose function mask_pan passes eval/code_reference/CQ-14_tests.py."
+    match:
+      type: reference_tests
+      function: mask_pan
+      tests: eval/code_reference/CQ-14_tests.py
+    category: rules
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-14.py
+    broken_solutions:
+      - eval/code_reference/CQ-14_broken_1.py
+      - eval/code_reference/CQ-14_broken_2.py
+    notes: "Separators keep their positions, so masking counts digits, not characters."
+
+  - id: CQ-15
+    question: |
+      Write a Python function with this signature:
+
+      def decode_varint(data: bytes, offset: int = 0) -> tuple[int, int]
+
+      It decodes one unsigned variable-length integer (LEB128, as used by Protocol Buffers) that starts at data[offset]. Each byte carries seven bits of the value in its low seven bits, least significant group first. A byte whose top bit (0x80) is set is followed by another byte; the byte whose top bit is clear is the last one.
+
+      Return a tuple (value, next_offset), where next_offset is the index of the byte after the last byte of this integer. Bytes after the integer are ignored.
+
+      Raise ValueError when the data ends before a byte with a clear top bit is found (this includes an offset at or past the end of the data), and when the integer is longer than 10 bytes.
+    expected_answer: "A module whose function decode_varint passes eval/code_reference/CQ-15_tests.py."
+    match:
+      type: reference_tests
+      function: decode_varint
+      tests: eval/code_reference/CQ-15_tests.py
+    category: encoding
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-15.py
+    broken_solutions:
+      - eval/code_reference/CQ-15_broken_1.py
+      - eval/code_reference/CQ-15_broken_2.py
+    notes: "Group order, the returned offset when decoding from the middle of a buffer, and the 10-byte limit."
+
+  - id: CQ-16
+    question: |
+      Write a Python function with this signature:
+
+      def parse_duration(text: str) -> int
+
+      It converts a duration such as "1h30m" to a number of seconds. The text is one or more parts with nothing between or around them. Each part is a non-negative integer written in ASCII digits, followed directly by one unit letter: d (days), h (hours), m (minutes) or s (seconds), in lowercase. The units must appear in that order, days first and seconds last, and each unit at most once.
+
+      Examples: "1h30m" is 5400, "2d" is 172800, "90s" is 90, "0s" is 0, "1d2h3m4s" is 93784.
+
+      Raise ValueError for anything else, for example "", "10", "h", "1h1h", "30m1h", "1.5h", "1H", " 1h", "1h ", "-1h" and "1h 30m".
+    expected_answer: "A module whose function parse_duration passes eval/code_reference/CQ-16_tests.py."
+    match:
+      type: reference_tests
+      function: parse_duration
+      tests: eval/code_reference/CQ-16_tests.py
+    category: parsing
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-16.py
+    broken_solutions:
+      - eval/code_reference/CQ-16_broken_1.py
+      - eval/code_reference/CQ-16_broken_2.py
+    notes: "Order and at-most-once are the rules a split-and-sum solution misses; the empty string matches an all-optional pattern."
+
+  - id: CQ-17
+    question: |
+      Write a Python function with this signature:
+
+      def compare_versions(a: str, b: str) -> int
+
+      It compares two version strings and returns -1 when `a` is lower than `b`, 1 when `a` is higher, and 0 when they are equal in precedence. Both strings are well formed; no validation is needed.
+
+      A version is MAJOR.MINOR.PATCH, three non-negative integers. It may be followed by "-" and a pre-release (identifiers separated by dots; an identifier may itself contain hyphens), and then by "+" and build metadata. Examples: "1.4.0", "2.0.0-rc.1", "1.0.0-alpha+001", "1.0.0+20130313".
+
+      Rules:
+      1. Build metadata is ignored.
+      2. Compare MAJOR, then MINOR, then PATCH, as numbers.
+      3. When those are equal, a version with a pre-release is lower than one without.
+      4. Two pre-releases are compared identifier by identifier, left to right. Identifiers made only of digits are compared as numbers. An identifier made only of digits is lower than one that contains letters or hyphens. Two identifiers with letters or hyphens are compared as ASCII strings. When all shared identifiers are equal, the pre-release with fewer identifiers is lower.
+    expected_answer: "A module whose function compare_versions passes eval/code_reference/CQ-17_tests.py."
+    match:
+      type: reference_tests
+      function: compare_versions
+      tests: eval/code_reference/CQ-17_tests.py
+    category: rules
+    expected_route: mid
+    difficulty: hard
+    reference_solution: eval/code_reference/CQ-17.py
+    broken_solutions:
+      - eval/code_reference/CQ-17_broken_1.py
+      - eval/code_reference/CQ-17_broken_2.py
+    notes: "The precedence rules are stated in the question; the chain alpha < alpha.1 < alpha.beta < beta < beta.2 < beta.11 < rc.1 < release is the one the semantic versioning specification gives."
+
+  - id: CQ-18
+    question: |
+      Write a Python function with this signature:
+
+      def wrap_text(text: str, width: int) -> list[str]
+
+      It breaks `text` into lines of at most `width` characters and returns the lines. Do not use the textwrap module.
+
+      Rules:
+      - Words are the pieces of `text` separated by any whitespace. Runs of whitespace count as one separator, and leading and trailing whitespace is ignored.
+      - Lines are filled greedily: a word joins the current line, after a single space, when the line stays within `width`; otherwise it starts a new line.
+      - A word longer than `width` first ends the current line, if that line has any words. The word is then cut into pieces of `width` characters. Every full piece is a line by itself. The final, shorter piece (if there is one) starts the next line, and the following words may join that line by the greedy rule.
+      - No line is empty and no line starts or ends with a space. Text without words gives an empty list.
+      - Raise ValueError when `width` is less than 1.
+    expected_answer: "A module whose function wrap_text passes eval/code_reference/CQ-18_tests.py."
+    match:
+      type: reference_tests
+      function: wrap_text
+      tests: eval/code_reference/CQ-18_tests.py
+    category: sequence
+    expected_route: mid
+    difficulty: hard
+    reference_solution: eval/code_reference/CQ-18.py
+    broken_solutions:
+      - eval/code_reference/CQ-18_broken_1.py
+      - eval/code_reference/CQ-18_broken_2.py
+    notes: "The long-word rule is spelled out so that there is one right answer; the cases around the last piece are the discriminating ones."
+
+  - id: CQ-19
+    question: |
+      Write a Python function with this signature:
+
+      def spiral_order(matrix: list[list[int]]) -> list[int]
+
+      `matrix` is a list of rows of equal length. Return its elements in clockwise spiral order: start at the top-left element, go right along the top row, down the right column, left along the bottom row, up the left column, and continue inwards the same way until every element has been visited exactly once.
+
+      The matrix may be any rectangle, including a single row or a single column. An empty list, or a list of empty rows, gives an empty list. Do not modify the matrix.
+    expected_answer: "A module whose function spiral_order passes eval/code_reference/CQ-19_tests.py."
+    match:
+      type: reference_tests
+      function: spiral_order
+      tests: eval/code_reference/CQ-19_tests.py
+    category: sequence
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-19.py
+    broken_solutions:
+      - eval/code_reference/CQ-19_broken_1.py
+      - eval/code_reference/CQ-19_broken_2.py
+    notes: "Rectangles whose spiral ends in a single row or column expose the two missing guards."
+
+  - id: CQ-20
+    question: |
+      Write a Python function with this signature:
+
+      def missing_ranges(numbers: list[int], lower: int, upper: int) -> list[str]
+
+      `numbers` is a list of distinct integers in ascending order, all between `lower` and `upper` inclusive. Return the integers from `lower` to `upper` inclusive that are not in `numbers`, grouped into runs of consecutive integers, in ascending order. A run of one integer n is written "n". A run of two or more integers from a to b is written "a->b".
+
+      Raise ValueError when `lower` is greater than `upper`. When nothing is missing, return an empty list.
+    expected_answer: "A module whose function missing_ranges passes eval/code_reference/CQ-20_tests.py."
+    match:
+      type: reference_tests
+      function: missing_ranges
+      tests: eval/code_reference/CQ-20_tests.py
+    category: sequence
+    expected_route: mid
+    difficulty: medium
+    reference_solution: eval/code_reference/CQ-20.py
+    broken_solutions:
+      - eval/code_reference/CQ-20_broken_1.py
+      - eval/code_reference/CQ-20_broken_2.py
+    notes: "The run after the last number and the one-integer run are the two usual slips."

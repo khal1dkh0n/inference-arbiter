@@ -33,6 +33,7 @@ Normalization applied to both the model answer and the reference unless stated: 
 | `exact` | none (compares against `expected_answer`) | Normalized answer equals normalized `expected_answer`. For code-output cases, also ignore a surrounding code fence. |
 | `contains` | `all_of` (list, each must appear), `any_of` (list, at least one must appear); either or both may be present | Case-insensitive substring match after normalization. Passes only if every `all_of` item is present and, when `any_of` is present, at least one of its items is present. |
 | `numeric` | `value`, `tolerance` (absolute) | Parse the final number in the answer (strip thousands separators and currency symbols); pass if `abs(parsed - value) <= tolerance`. A `tolerance` of 0 means exact integer equality. If the answer contains several numbers, use the last one stated as the final result. |
+| `reference_tests` | `function`, `tests` (path of a `unittest` file) | Code set only (see "Code set" below). The code in the answer is run in the sandbox against the fixed reference tests; it passes only when every one of them passes. No judge. `grade_answer` itself does not grade this type: without the sandbox path the case is `ungraded`. |
 | `rubric` | `criteria` (list of statements), `pass_rule` | Judged by an LLM grader (use a fixed grader model and prompt, temperature 0) or by hand. Each criterion is scored met or not met independently; the case passes only when `pass_rule` holds (currently always: all criteria met). Grader sees the question, the reference answer and the criteria, never the routing trace. |
 
 Details the table leaves open, as implemented:
@@ -60,6 +61,7 @@ Rubric cases carry the most grader noise. Before trusting a Phase 2 scorecard, h
 | `chain` | Chain mode. `--verifier-tier` is passed through on the request. |
 | `execute:<tier>` | Execute mode, one program written by the tier. |
 | `crosscheck:<tier A>+<tier B>` | Execute mode with two independently written programs. |
+| `codetest:<solution tier>+<tests tier>` | Codetest mode: one tier writes a solution, the other writes unit tests without seeing it, both run in one sandbox. `codetest:<tier>` takes the tests tier from `code_test.tests_tier`. Meant for the code set. |
 | `auto` | Auto mode with the computation check forced off: one call to `auto.closed_book_tier`, with its `on_error` hop. |
 | `auto:check` | Auto mode with the computation check forced on: a question the check says a program can compute goes to execute mode, the rest take the closed-book call. The scorecard adds a table of what the check did. |
 
@@ -170,3 +172,81 @@ The first eleven reasoning, domain and trap cases all passed on the mid tier, in
 HR-08 and HR-10 were run once more (`data/eval/hard_mid_v2_rerun2.json`) and timed out again, so on the mid tier they behave like the execution-only cases.
 
 Taken with the run above, the mid tier gave no answer of its own on about 8 of the 26 cases (HX-04's provider error included) and was graded wrong on none. Across some forty different cases tried on it over the two days, it was graded wrong twice. On this model the set separates strategies by time and volume of computation, not by reasoning errors; that is the result to plan around, and a strategy that runs code should recover the timed-out cases.
+
+## Code set
+
+File: `eval/code_questions.yaml` (version 1, 20 cases, written 2026-11-24). Every case asks for one Python function with a stated signature and states the rules the function must follow, including the errors it must raise. It measures codetest mode against a single direct call, and it measures what the tests that codetest mode generates are worth.
+
+```
+uv run python scripts/run_eval.py --golden eval/code_questions.yaml --strategies tier:mid codetest:mid+local codetest:mid+mid --out data/eval/code_run1.json --db data/eval/telemetry_code.db --routes-out data/eval/code_measured_routes.json
+```
+
+Pass `--routes-out` and `--db` so a run of this file leaves the golden set's routes and telemetry alone. The run needs the `sbx` CLI: grading itself runs code in the sandbox.
+
+### Case schema
+
+The eight fields of the golden schema, with these differences:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `CQ-01` to `CQ-20`. Never reused. |
+| `question` | States the signature as one `def` line and every rule the tests rely on. |
+| `expected_answer` | A sentence naming the reference tests; not compared with anything. |
+| `match` | `type: reference_tests`, `function` (the function's name) and `tests` (the reference test file). |
+| `category` | `encoding`, `parsing`, `numeric`, `sequence` or `rules`. |
+| `reference_solution` | A right solution, `eval/code_reference/<id>.py`. |
+| `broken_solutions` | Seeded wrong solutions, `eval/code_reference/<id>_broken_<n>.py`: the reference solution with one small bug each, named in the file's docstring. Two per case. |
+
+| Category | Count | Ids |
+| --- | --- | --- |
+| `encoding` | 3 | CQ-01 (Luhn check digit), CQ-04 (CRC-16), CQ-15 (varint) |
+| `parsing` | 5 | CQ-02 (BER-TLV), CQ-08 (ISO 8583 bitmap), CQ-09 (strict Roman numerals), CQ-12 (path normalisation), CQ-16 (durations) |
+| `numeric` | 3 | CQ-03 (half-even minor units), CQ-11 (RPN with truncating division), CQ-13 (largest-remainder allocation) |
+| `sequence` | 5 | CQ-05 (interval merge), CQ-10 (top words), CQ-18 (text wrap), CQ-19 (spiral order), CQ-20 (missing ranges) |
+| `rules` | 4 | CQ-06 (IBAN mod 97), CQ-07 (business days), CQ-14 (PAN masking), CQ-17 (version precedence) |
+
+No case of the golden or the hard set is reused: their code cases ask what a snippet prints or for a value, not for a function. Some topics (Luhn, BER-TLV, CRC-16, half-even rounding) are shared with the hard set; the questions and all reference files are new.
+
+### Grading: the reference tests only
+
+Whatever the strategy, pass or fail comes from one thing: the code in the answer, run in the sandbox against the case's reference tests, through the same driver codetest mode uses (`src/inference_arbiter/codetest_driver.py`) and the same gate. For a codetest run the code is the returned solution; for any other strategy it is the content of the last code fence of the answer, and an answer without one fails.
+
+| Reference run | Grade |
+| --- | --- |
+| Every reference test passed | `pass` |
+| A test failed, the code did not load or lacks the function, or the run did not finish | `fail` |
+| The sandbox or the gate failed | `ungraded` |
+
+The tests a codetest run generated for itself never decide a grade. No judge model is called for this set.
+
+How the reference files are kept out of every prompt: the request sent to the harness is built from the case's `question` alone; the reference files are read in the grading step, after the answer has come back, and go to the sandbox and nowhere else. `tests/test_run_eval.py` plants a marker in all three kinds of reference file and asserts that it reaches the sandbox and no model call, for a codetest run and for a plain tier run, and that the check fails when a request is built with the reference tests in it.
+
+### What the generated tests were worth
+
+For a codetest strategy each record also says what the run's own generated tests said about the solution, set against the reference tests (`run_eval.model_tests_verdict`):
+
+| Generated tests | Reference tests | Verdict |
+| --- | --- | --- |
+| failed | failed | `caught` |
+| passed | failed | `missed` |
+| failed | passed | `false_alarm` |
+| passed | passed | `clean` |
+| untested | passed or failed | `untested` |
+
+The scorecard prints these counts twice, for the returned solution and for the first solution before any repair, with the catch rate (caught / (caught + missed)) and the false alarm rate (false_alarm / (false_alarm + clean)), each with a 95% Wilson interval. It also prints how many repairs turned a reference fail into a pass (`repair fixed`) and the reverse (`repair broke`): a repair is driven by generated tests, and wrong tests can bend a right solution.
+
+A strong solution tier writes few wrong solutions, so the catch rate above can rest on very few cases. The seeded figures do not depend on the solution tier: each case's generated tests are also run against that case's seeded wrong solutions (caught when they fail one, missed when they pass it) and against its reference solution (tests that fail it are wrong tests).
+
+Every figure is computed from the records in the result file, which keep the solution, the first solution, the generated tests, and every reference and seeded run with its sandbox name and whether the sandbox was removed. These grading runs are not in the telemetry database; the harness's own runs are.
+
+### What the tests prove
+
+`tests/test_code_questions.py` loads the file through `run_eval.load_golden`, checks the schema, and runs every reference file: each case's reference tests pass its reference solution (at least five tests, none skipped, and they do not pass against a stub that raises), and they fail every seeded wrong solution. It also checks that the question states exactly the signature the reference solution has, that every file under `eval/code_reference/` belongs to a case, and that no question quotes an assertion of its reference tests.
+
+### Rules for adding or changing a case
+
+1. State the signature and every rule a test relies on in the question. A behaviour the question leaves open must not be tested.
+2. Write the reference solution and the reference tests before any model is run on the case, and do not edit them to make a model's answer pass.
+3. Give each case at least two seeded wrong solutions that the reference tests fail, each one small change to the reference solution.
+4. Standard library only, no input, no files, no network, a few seconds at most.
+5. Bump `version` when a case is edited or removed.

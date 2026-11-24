@@ -30,6 +30,9 @@ from pathlib import Path
 # output matched the claim of the model that wrote it". From version 8 that is
 # `claim_matched`, and `verified` means two independently written programs agreed. The
 # migration rewrites the old rows, so `verified` has one meaning in every database.
+# Codetest mode added no column and no version: its statuses (tests_passed, tests_failed,
+# untested) are values of `runs.execution_status`, its calls have the roles `interface` and
+# `tests`, and its sandbox runs are `sandbox_runs` rows.
 # Older databases are migrated in place when opened: columns are added with defaults,
 # so rows written by an earlier version stay readable.
 SCHEMA_VERSION = 8
@@ -74,7 +77,8 @@ class SandboxRunRecord:
     runner: str  # python
     program: str
     claimed_answer: str | None
-    executed_answer: str | None  # last non-empty stdout line of a clean run
+    # Last non-empty stdout line of a clean run. Codetest mode: the test run's result line.
+    executed_answer: str | None
     status: str  # 'ok' | 'error'
     error_type: str | None  # sandbox_unavailable | timeout | nonzero_exit | output_too_large | ...
     exit_code: int | None
@@ -89,7 +93,8 @@ class SandboxRunRecord:
     environment_names: str  # JSON list of the variable names the program was given
     sandbox_removed: bool
     # agree | disagree | no_claim | program_failed | infra_failed; in a cross-check
-    # ran | program_failed | infra_failed
+    # ran | program_failed | infra_failed; in codetest mode passed | vacuous | tests_failed |
+    # solution_invalid | tests_invalid | not_finished | infra_failed
     outcome: str
     # Added in schema version 8: which program of a cross-check this is (a | b).
     program_label: str = "a"

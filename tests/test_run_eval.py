@@ -1327,3 +1327,441 @@ def test_scorecard_prints_the_computation_check_table_only_when_the_check_ran(ca
 
     run_eval.print_scorecard(run_eval.build_scorecard(records[:1]), case_count=1)
     assert "Computation check (auto:check" not in capsys.readouterr().out
+
+
+# --- the code set: reference tests in the sandbox, and what the generated tests were worth ---
+
+from inference_arbiter import codetest, codetest_driver  # noqa: E402
+from inference_arbiter.schemas import AskRequest  # noqa: E402
+
+from conftest import (  # noqa: E402
+    HarnessKit,
+    make_execute_config,
+    ok_result,
+    program_output,
+    run_program_on_host,
+    sandbox_result,
+)
+
+CODE_CASES, _ = run_eval.load_golden(REPO_ROOT / "eval" / "code_questions.yaml")
+LUHN_CASE = next(case for case in CODE_CASES if case["id"] == "CQ-01")
+LUHN_GOOD = (REPO_ROOT / LUHN_CASE["reference_solution"]).read_text(encoding="utf-8")
+LUHN_WRONG = (REPO_ROOT / LUHN_CASE["broken_solutions"][0]).read_text(encoding="utf-8")
+# Generated tests that hold one right expected value: they pass a right solution and
+# happen to pass the first seeded bug too.
+LUHN_WEAK_TESTS = '''import unittest
+from solution import luhn_check_digit
+
+
+class T(unittest.TestCase):
+    def test_zero(self):
+        self.assertEqual(luhn_check_digit("0"), 0)
+'''
+LUHN_STRONG_TESTS = '''import unittest
+from solution import luhn_check_digit
+
+
+class T(unittest.TestCase):
+    def test_known(self):
+        self.assertEqual(luhn_check_digit("7992739871"), 3)
+
+    def test_zero(self):
+        self.assertEqual(luhn_check_digit("0"), 0)
+'''
+# Generated tests with a wrong expected value: they fail a right solution.
+LUHN_WRONG_TESTS = '''import unittest
+from solution import luhn_check_digit
+
+
+class T(unittest.TestCase):
+    def test_known(self):
+        self.assertEqual(luhn_check_digit("7992739871"), 4)
+'''
+
+
+def host_runner(tmp_path):
+    programs: list[str] = []
+
+    def runner(program: str):
+        programs.append(program)
+        return run_program_on_host(tmp_path, program)
+
+    runner.programs = programs
+    return runner
+
+
+def driver_output(stage: str = "ran", tests_run: int = 2, **fields):
+    """What the harness's own sandbox run returns for a driver run with these counts."""
+    summary = codetest_driver.blank_summary(stage)
+    failed = any(fields.get(name) for name in ("failures", "errors"))
+    summary.update(tests_run=tests_run, stub_passed=None if failed or stage != "ran" else False)
+    summary.update(fields)
+    return program_output(
+        stdout=codetest.RESULT_MARKER + json.dumps(summary) + "\n", exit_code=codetest_driver.exit_code_for(summary)
+    )
+
+
+def code_kit(**code_test_overrides) -> HarnessKit:
+    settings = {"interface_tier": "local", "solution_tier": "mid", "tests_tier": "code", "parallel": False}
+    settings.update(code_test_overrides)
+    return HarnessKit(make_execute_config(code_test=settings))
+
+
+def script_codetest(kit: HarnessKit, tests: str, *solutions: str, runs) -> None:
+    signature = "def luhn_check_digit(payload: str) -> int:"
+    kit.client.script("local-model", ok_result(json.dumps({"function_name": "luhn_check_digit", "signature": signature})))
+    kit.client.script("mid-model", *[ok_result(json.dumps({"working": "w", "solution": text})) for text in solutions])
+    kit.client.script("code-model", ok_result(json.dumps({"working": "w", "tests": tests})))
+    kit.sandbox_runner.script("run", *runs)
+
+
+CODETEST_STRATEGY = run_eval.parse_strategy("codetest:mid+code")
+
+
+def test_parse_codetest_strategy():
+    both = run_eval.parse_strategy("codetest:mid+local")
+    assert (both.kind, both.tier, both.tests_tier) == ("codetest", "mid", "local")
+    one = run_eval.parse_strategy("codetest:mid")
+    assert (one.kind, one.tier, one.tests_tier) == ("codetest", "mid", None)
+    for bad in ("codetest:", "codetest:+local", "codetest:mid+"):
+        with pytest.raises(ValueError, match="codetest:<solution tier>"):
+            run_eval.parse_strategy(bad)
+    assert "codetest" in run_eval.SUITE_KINDS[run_eval.SUITE_CLOSEDBOOK]
+    assert run_eval.unsupported_reason(both) is None
+
+
+def test_codetest_strategy_requests_codetest_mode_on_its_tiers():
+    request = run_eval.build_request(run_eval.parse_strategy("codetest:mid+local"), "q", None)
+    assert (request.mode, request.tier, request.tests_tier) == ("codetest", "mid", "local")
+    default_tests = run_eval.build_request(run_eval.parse_strategy("codetest:mid"), "q", None)
+    assert (default_tests.mode, default_tests.tests_tier) == ("codetest", None)
+
+
+@pytest.mark.parametrize(
+    "tests_status, reference_grade, verdict",
+    [
+        ("tests_failed", "fail", "caught"),
+        ("tests_passed", "fail", "missed"),
+        ("tests_failed", "pass", "false_alarm"),
+        ("tests_passed", "pass", "clean"),
+        ("untested", "pass", "untested"),
+        ("untested", "fail", "untested"),
+        ("tests_passed", "ungraded", None),
+        ("tests_failed", "ungraded", None),
+        ("untested", "ungraded", None),
+        ("tests_passed", None, None),
+        ("failed", "fail", None),
+        ("skipped", "pass", None),
+        (None, "pass", None),
+    ],
+)
+def test_model_tests_verdict_table(tests_status, reference_grade, verdict):
+    assert run_eval.model_tests_verdict(tests_status, reference_grade) == verdict
+
+
+@pytest.mark.parametrize(
+    "run_class, grade",
+    [
+        ("passed", "pass"), ("tests_failed", "fail"), ("solution_invalid", "fail"), ("not_finished", "fail"),
+        ("tests_invalid", "fail"), ("vacuous", "fail"), ("infra_failed", "ungraded"),
+    ],
+)
+def test_reference_grade_of(run_class, grade):
+    run = {"run_class": run_class, "reason": "why", "tests_run": 6, "tests_failed": 2}
+    assert run_eval.reference_grade_of(run)[0] == grade
+
+
+def test_answer_code_is_the_last_code_fence():
+    answer = "First try:\n```python\nx = 1\n```\nBetter:\n```python\ndef f():\n    return 2\n```\nDone."
+    assert run_eval.answer_code(answer) == "def f():\n    return 2\n"
+    assert run_eval.answer_code("no code here") is None
+    assert run_eval.answer_code(None) is None
+
+
+@pytest.mark.parametrize(
+    "answer, outcome, reason_part",
+    [
+        (f"Here it is.\n\n```python\n{LUHN_GOOD}```", "pass", "reference tests passed"),
+        (f"```python\n{LUHN_WRONG}```", "fail", "reference tests failed"),
+        ("```python\ndef luhn_check_digit(payload)\n```", "fail", "solution_invalid"),
+        ("```python\ndef other(payload):\n    return 0\n```", "fail", "solution_missing_function"),
+        ("The check digit is computed by doubling every second digit.", "fail", "no code block"),
+    ],
+)
+def test_a_plain_tier_answer_on_a_code_case_is_graded_by_the_reference_tests(tmp_path, answer, outcome, reason_part):
+    requests: list = []
+    harness = SimpleNamespace(
+        answer=lambda request: (requests.append(request), fake_result(answer, mode="route"))[1]
+    )
+    judge = FakeJudge()
+
+    record = run_eval.run_case(
+        harness, run_eval.parse_strategy("tier:mid"), LUHN_CASE, judge, reference_runner=host_runner(tmp_path)
+    )
+
+    assert record["outcome"] == outcome and reason_part in record["grade_reason"]
+    assert record["match_type"] == "reference_tests"
+    assert judge.judged == [], "no judge is involved in a code case"
+    assert record["model_tests_verdict"] is None and record["seeded"] is None
+    assert requests[0].messages[0].content == LUHN_CASE["question"]
+
+
+def test_without_a_sandbox_runner_a_code_case_is_ungraded():
+    harness = SimpleNamespace(answer=lambda request: fake_result(f"```python\n{LUHN_GOOD}```", mode="route"))
+
+    record = run_eval.run_case(harness, run_eval.parse_strategy("tier:mid"), LUHN_CASE, None)
+
+    assert record["outcome"] == "ungraded" and "no sandbox runner" in record["grade_reason"]
+
+
+def test_a_sandbox_failure_during_reference_grading_is_ungraded():
+    harness = SimpleNamespace(answer=lambda request: fake_result(f"```python\n{LUHN_GOOD}```", mode="route"))
+
+    record = run_eval.run_case(
+        harness, run_eval.parse_strategy("tier:mid"), LUHN_CASE, None,
+        reference_runner=lambda program: sandbox_result("sandbox_unavailable", exit_code=None),
+    )
+
+    assert record["outcome"] == "ungraded"
+    assert record["reference_run"]["run_class"] == "infra_failed"
+
+
+@pytest.mark.parametrize(
+    "solution, tests, own_run, status, outcome, verdict",
+    [
+        (LUHN_WRONG, LUHN_WEAK_TESTS, driver_output(tests_run=1), "tests_passed", "fail", "missed"),
+        (LUHN_GOOD, LUHN_STRONG_TESTS, driver_output(), "tests_passed", "pass", "clean"),
+        (LUHN_GOOD, LUHN_STRONG_TESTS, driver_output(stub_passed=True), "untested", "pass", "untested"),
+    ],
+)
+def test_codetest_runs_are_graded_by_the_reference_tests_not_by_their_own(
+    tmp_path, solution, tests, own_run, status, outcome, verdict
+):
+    kit = code_kit()
+    script_codetest(kit, tests, solution, runs=[own_run])
+
+    record = run_eval.run_case(kit.harness, CODETEST_STRATEGY, LUHN_CASE, None, reference_runner=host_runner(tmp_path))
+
+    assert (record["execution_status"], record["outcome"], record["model_tests_verdict"]) == (status, outcome, verdict)
+    assert record["first_model_tests_verdict"] == verdict, "no repair: the first solution is the returned one"
+    assert record["first_reference_run"] is None
+    assert (record["mode"], record["tests_tier"], record["code_function"]) == ("codetest", "code", "luhn_check_digit")
+    assert (record["code_solution"], record["code_tests"]) == (solution, tests)
+
+
+def test_caught_and_false_alarm_come_from_a_failing_generated_suite(tmp_path):
+    failed_run = driver_output(failures=1, failed_tests=["test_known"])
+    caught_kit, alarm_kit = code_kit(max_repairs=0), code_kit(max_repairs=0)
+    script_codetest(caught_kit, LUHN_STRONG_TESTS, LUHN_WRONG, runs=[failed_run])
+    script_codetest(alarm_kit, LUHN_WRONG_TESTS, LUHN_GOOD, runs=[failed_run])
+    runner = host_runner(tmp_path)
+
+    caught = run_eval.run_case(caught_kit.harness, CODETEST_STRATEGY, LUHN_CASE, None, reference_runner=runner)
+    alarm = run_eval.run_case(alarm_kit.harness, CODETEST_STRATEGY, LUHN_CASE, None, reference_runner=runner)
+
+    assert (caught["execution_status"], caught["outcome"], caught["model_tests_verdict"]) == ("tests_failed", "fail", "caught")
+    assert (alarm["execution_status"], alarm["outcome"], alarm["model_tests_verdict"]) == ("tests_failed", "pass", "false_alarm")
+    assert alarm["seeded"]["reference_solution"]["run_class"] == "tests_failed", "wrong tests reject the reference solution"
+
+
+def test_first_and_repaired_solutions_are_recorded_separately(tmp_path):
+    kit = code_kit()
+    script_codetest(
+        kit, LUHN_STRONG_TESTS, LUHN_WRONG, LUHN_GOOD,
+        runs=[driver_output(failures=1, failed_tests=["test_known"]), driver_output()],
+    )
+
+    record = run_eval.run_case(kit.harness, CODETEST_STRATEGY, LUHN_CASE, None, reference_runner=host_runner(tmp_path))
+
+    assert (record["repaired"], record["code_first_outcome"]) == (True, "tests_failed")
+    assert (record["outcome"], record["model_tests_verdict"]) == ("pass", "clean")
+    assert (record["first_reference_grade"], record["first_model_tests_verdict"]) == ("fail", "caught")
+    assert record["first_reference_run"]["run_class"] == "tests_failed"
+    assert (record["code_first_solution"], record["code_solution"]) == (LUHN_WRONG, LUHN_GOOD)
+    summary = run_eval.summarise_code_tests([record])
+    assert (summary["repaired"], summary["repair_fixed"], summary["repair_broke"]) == (1, 1, 0)
+    assert summary["first_attempt"]["caught"] == 1 and summary["returned"]["clean"] == 1
+
+
+def test_seeded_bugs_are_run_against_the_generated_tests(tmp_path):
+    weak_kit, strong_kit = code_kit(), code_kit()
+    script_codetest(weak_kit, LUHN_WEAK_TESTS, LUHN_GOOD, runs=[driver_output(tests_run=1)])
+    script_codetest(strong_kit, LUHN_STRONG_TESTS, LUHN_GOOD, runs=[driver_output()])
+    runner = host_runner(tmp_path)
+
+    weak = run_eval.run_case(weak_kit.harness, CODETEST_STRATEGY, LUHN_CASE, None, reference_runner=runner)
+    strong = run_eval.run_case(strong_kit.harness, CODETEST_STRATEGY, LUHN_CASE, None, reference_runner=runner)
+
+    assert [run["path"] for run in weak["seeded"]["broken"]] == LUHN_CASE["broken_solutions"]
+    assert [run["run_class"] for run in weak["seeded"]["broken"]] == ["passed", "tests_failed"]
+    assert [run["run_class"] for run in strong["seeded"]["broken"]] == ["tests_failed", "tests_failed"]
+    assert weak["seeded"]["reference_solution"]["run_class"] == "passed"
+    seeded = run_eval.summarise_code_tests([weak, strong])["seeded"]
+    assert (seeded["cases_with_tests"], seeded["broken_runs"], seeded["caught"], seeded["missed"]) == (2, 4, 3, 1)
+    assert seeded["catch_rate"]["rate"] == 0.75
+    assert (seeded["tests_pass_reference_solution"], seeded["tests_reject_reference_solution"]) == (2, 0)
+
+
+def test_a_codetest_run_without_an_answer_is_an_error_and_is_not_graded(tmp_path):
+    kit = code_kit()
+    kit.client.script("local-model", ok_result("not json"))
+    runner = host_runner(tmp_path)
+
+    record = run_eval.run_case(kit.harness, CODETEST_STRATEGY, LUHN_CASE, None, reference_runner=runner)
+
+    assert (record["outcome"], record["error_type"]) == ("error", "interface_invalid")
+    assert runner.programs == [] and record["reference_run"] is None
+
+
+def code_record(verdict, first_verdict=None, outcome="pass", **extra) -> dict:
+    fields = dict(
+        mode="codetest", model_tests_verdict=verdict,
+        first_model_tests_verdict=first_verdict if first_verdict is not None else verdict,
+    )
+    fields.update(extra)
+    return record("codetest:mid+local", f"CQ-{len(fields)}", outcome, **fields)
+
+
+def test_code_tests_summary_counts_and_rates():
+    records = (
+        [code_record("caught", outcome="fail")] * 3
+        + [code_record("missed", outcome="fail")]
+        + [code_record("false_alarm")]
+        + [code_record("clean")] * 4
+        + [code_record("untested")]
+        + [code_record(None, outcome="error")]
+    )
+
+    summary = run_eval.summarise_code_tests(records)
+
+    returned = summary["returned"]
+    assert (returned["caught"], returned["missed"], returned["false_alarm"], returned["clean"]) == (3, 1, 1, 4)
+    assert (returned["untested"], returned["no_verdict"], summary["runs"]) == (1, 1, 11)
+    assert (returned["catch_rate"]["count"], returned["catch_rate"]["of"], returned["catch_rate"]["rate"]) == (3, 4, 0.75)
+    assert (returned["false_alarm_rate"]["count"], returned["false_alarm_rate"]["of"]) == (1, 5)
+    assert returned["catch_rate"]["ci95"] == list(run_eval.wilson_interval(3, 4))
+    assert summary["seeded"]["catch_rate"]["rate"] is None, "no seeded run, no rate"
+
+
+def test_strategies_that_are_not_codetest_have_no_code_tests_summary(capsys):
+    records = [record("tier:mid", "CQ-01", "pass"), code_record("clean")]
+
+    scorecard = run_eval.build_scorecard(records)
+    run_eval.print_scorecard(scorecard, 1)
+
+    by_name = {summary["strategy"]: summary for summary in scorecard["strategies"]}
+    assert by_name["tier:mid"]["code_tests"] is None
+    assert by_name["codetest:mid+local"]["code_tests"]["runs"] == 1
+    printed = capsys.readouterr().out
+    assert "Generated tests against the reference tests" in printed
+    assert "Repairs and seeded bugs" in printed
+    assert printed.count("codetest:mid+local") >= 3
+
+
+def test_regrade_keeps_a_reference_graded_record_as_it_is():
+    stored = record("tier:mid", "CQ-01", "fail", answer="```python\nx\n```", match_type="reference_tests",
+                    grade="fail", grade_reason="2 of 6 reference tests failed")
+
+    (regraded,) = run_eval.regrade_records([stored], [LUHN_CASE], None)
+
+    assert (regraded["outcome"], regraded["grade_reason"]) == ("fail", "2 of 6 reference tests failed")
+
+
+# --- guardrail: nothing of the reference files reaches a model call ---
+
+REFERENCE_MARK = "REFERENCE-ONLY-MARKER-91c2"
+
+
+def marked_case(tmp_path) -> dict:
+    """A code case whose three reference files all carry the marker."""
+    files = {
+        "tests.py": f"# {REFERENCE_MARK} tests\n{LUHN_STRONG_TESTS}",
+        "good.py": f"# {REFERENCE_MARK} solution\n{LUHN_GOOD}",
+        "broken.py": f"# {REFERENCE_MARK} broken\n{LUHN_WRONG}",
+    }
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    case = dict(LUHN_CASE)
+    case["match"] = {**LUHN_CASE["match"], "tests": str(tmp_path / "tests.py")}
+    case["reference_solution"] = str(tmp_path / "good.py")
+    case["broken_solutions"] = [str(tmp_path / "broken.py")]
+    return case
+
+
+def assert_no_reference_text_in_any_call(kit: HarnessKit) -> None:
+    assert kit.client.calls, "the scenario made model calls"
+    for call in kit.client.calls:
+        for message in call.messages:
+            assert REFERENCE_MARK not in message["content"], "reference text reached a model call"
+
+
+def run_marked_codetest(tmp_path, kit: HarnessKit, runner):
+    script_codetest(
+        kit, LUHN_WEAK_TESTS, LUHN_WRONG, LUHN_GOOD,
+        runs=[driver_output(failures=1, failed_tests=["test_zero"]), driver_output(tests_run=1)],
+    )
+    return run_eval.run_case(kit.harness, CODETEST_STRATEGY, marked_case(tmp_path), None, reference_runner=runner)
+
+
+def test_no_reference_text_reaches_any_call_of_a_codetest_run(tmp_path):
+    kit, runner = code_kit(), host_runner(tmp_path)
+
+    record = run_marked_codetest(tmp_path, kit, runner)
+
+    assert_no_reference_text_in_any_call(kit)
+    assert [call.model for call in kit.client.calls] == ["local-model", "mid-model", "code-model", "mid-model"]
+    assert record["reference_run"] is not None and record["first_reference_run"] is not None
+    marked_programs = [program for program in runner.programs if REFERENCE_MARK in program]
+    assert len(marked_programs) == 4, "the marked files did go to the sandbox: two reference runs and two seeded runs"
+    assert all(REFERENCE_MARK not in str(value) for value in record.values()), "nor into the stored record"
+
+
+def test_no_reference_text_reaches_the_call_of_a_plain_tier_run(tmp_path):
+    kit, runner = HarnessKit(make_execute_config()), host_runner(tmp_path)
+    kit.client.script("mid-model", ok_result(f"```python\n{LUHN_GOOD}```"))
+
+    record = run_eval.run_case(
+        kit.harness, run_eval.parse_strategy("tier:mid"), marked_case(tmp_path), None, reference_runner=runner
+    )
+
+    assert record["outcome"] == "pass"
+    assert_no_reference_text_in_any_call(kit)
+    assert kit.client.calls[0].messages == [{"role": "user", "content": LUHN_CASE["question"]}]
+    assert len(runner.programs) == 1 and REFERENCE_MARK in runner.programs[0]
+
+
+def test_the_reference_check_catches_a_leak(tmp_path, monkeypatch):
+    """The check is not vacuous: a request built with the reference tests in it fails it."""
+    honest_builder = run_eval.build_request
+
+    def leaky_builder(strategy, question, verifier_tier):
+        request = honest_builder(strategy, question, verifier_tier)
+        leaked = (tmp_path / "tests.py").read_text(encoding="utf-8")
+        return AskRequest.from_question(
+            f"{question}\n\nThe tests are:\n{leaked}", mode=request.mode, tier=request.tier,
+            tests_tier=request.tests_tier,
+        )
+
+    monkeypatch.setattr(run_eval, "build_request", leaky_builder)
+    kit = code_kit()
+    run_marked_codetest(tmp_path, kit, host_runner(tmp_path))
+
+    with pytest.raises(AssertionError, match="reference text reached a model call"):
+        assert_no_reference_text_in_any_call(kit)
+
+
+def test_reference_files_are_read_only_after_the_answer_came_back(tmp_path, monkeypatch):
+    events: list[str] = []
+    honest_read = run_eval.read_reference_file
+    monkeypatch.setattr(
+        run_eval, "read_reference_file", lambda path: (events.append("read"), honest_read(path))[1]
+    )
+    kit = code_kit()
+    script_codetest(kit, LUHN_STRONG_TESTS, LUHN_GOOD, runs=[driver_output()])
+    honest_answer = kit.harness.answer
+    kit.harness.answer = lambda request: (honest_answer(request), events.append("answered"))[0]
+
+    run_eval.run_case(kit.harness, CODETEST_STRATEGY, marked_case(tmp_path), None, reference_runner=host_runner(tmp_path))
+
+    assert events[0] == "answered" and events.count("answered") == 1
+    assert events.count("read") == 3, "the reference tests, the reference solution and the one seeded bug"

@@ -31,10 +31,10 @@ Simulation = Literal[
 CHAIN_ONLY_SIMULATIONS = ("verifier-error", "draft-invalid")
 OPENBOOK_ONLY_SIMULATIONS = ("quote-mismatch", "grounding-error")
 CostSource = Literal["provider_reported", "estimated", "local_zero"]
-Mode = Literal["auto", "route", "chain", "openbook", "stuffed", "execute"]
+Mode = Literal["auto", "route", "chain", "openbook", "stuffed", "execute", "codetest"]
 SOURCE_MODES = ("openbook", "stuffed")
 # What a finished run reports: auto is always resolved to one of the others.
-EffectiveMode = Literal["route", "chain", "openbook", "stuffed", "execute"]
+EffectiveMode = Literal["route", "chain", "openbook", "stuffed", "execute", "codetest"]
 VerificationStatus = Literal["supported", "unsupported", "uncertain", "unavailable", "skipped"]
 GroundingStatus = Literal["grounded", "partly_grounded", "ungrounded", "unavailable", "skipped"]
 # execute mode, one program. claim_matched: the program ran cleanly and its output agrees
@@ -49,13 +49,22 @@ GroundingStatus = Literal["grounded", "partly_grounded", "ungrounded", "unavaila
 # `verified`. disputed: both ran and the outputs differ; both are shown, none as the
 # answer. one_sided: one program ran and the other did not; its output is the answer,
 # marked as not cross-checked. failed: neither ran.
+# codetest mode, a solution and a unittest suite written by separate calls (codetest.py).
+# tests_passed: every generated test passed in the sandbox, and the same tests did not pass
+# against a stub that raises on every call. The tests are model-written, so this is never
+# called `verified`. tests_failed: at least one generated test failed; the solution is
+# returned with the failing tests named. untested: the solution was not run against any
+# test that could fail it (no tests, tests that could not run, tests that check nothing, a
+# run that did not finish, or a sandbox failure). failed: the solution could not be loaded,
+# also after the one repair, so there is no answer and the run is an error.
 ExecutionStatus = Literal[
     "verified", "disputed", "one_sided", "claim_matched", "corrected", "executed", "unverified",
+    "tests_passed", "tests_failed", "untested",
     "failed", "skipped",
 ]
 CallRole = Literal[
     "triage", "answer", "draft", "verify", "repair", "embed", "ground", "escalate", "draft_b", "repair_b",
-    "check",
+    "check", "interface", "tests",
 ]
 # Auto mode's computation check (computation_check.py). not_run: the check was off, the
 # request had sources or the caller picked the mode or the tier. yes: the check said a short
@@ -97,6 +106,10 @@ class AskRequest(BaseModel):
     # of every source in the prompt (the baseline for openbook).
     # execute: the model writes a short Python program and the answer it claims; the
     # program runs in an isolated sandbox and code compares the two (see execute.py).
+    # codetest: one call fixes the function's interface, one writes a solution, one writes
+    # unittest tests from the question and the interface alone; both run in one isolated
+    # sandbox and the answer says whether the solution passed its generated tests
+    # (see codetest.py).
     mode: Mode = "auto"
     # chain: verify with this verifier tier instead of chain.verifier_tier.
     # openbook: ground with this verifier tier instead of openbook.grounding_verifier_tier.
@@ -119,6 +132,8 @@ class AskRequest(BaseModel):
     # auto without sources and without a forced tier only: run the computation check
     # before the closed-book call. None: use auto.computation_check from the config.
     computation_check: bool | None = None
+    # codetest only: the tier that writes the tests. None: code_test.tests_tier.
+    tests_tier: str | None = None
 
     @model_validator(mode="after")
     def _options_match_the_mode(self) -> "AskRequest":
@@ -136,6 +151,10 @@ class AskRequest(BaseModel):
             raise ValueError(f"simulate '{self.simulate}' needs mode 'chain'")
         if self.mode == "execute" and self.simulate not in (None, "answer-error"):
             raise ValueError("mode 'execute' supports simulate 'answer-error' only")
+        if self.mode == "codetest" and self.simulate not in (None, "answer-error"):
+            raise ValueError("mode 'codetest' supports simulate 'answer-error' only")
+        if self.mode != "codetest" and self.tests_tier is not None:
+            raise ValueError("tests_tier needs mode 'codetest'")
         if self.mode != "execute" and (self.cross_check is not None or self.cross_check_tier is not None):
             raise ValueError("cross_check and cross_check_tier need mode 'execute'")
         if self.cross_check is False and self.cross_check_tier is not None:
@@ -250,6 +269,39 @@ class ExecuteDraft(BaseModel):
         return self
 
 
+class CodeInterface(BaseModel):
+    """What the interface call must return in codetest mode: the one function both the
+    solution and the tests are written against. Checked in code (codetest.check_interface)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    function_name: str = Field(min_length=1)
+    # The function's `def` line, for example `def luhn_check_digit(payload: str) -> int:`.
+    signature: str = Field(min_length=1)
+
+
+class SolutionDraft(BaseModel):
+    """What the solution call and the repair call must return in codetest mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Declared first for the same reason as DraftAnswer.working.
+    working: str = ""
+    # Python 3 source of the module `solution`, standard library only.
+    solution: str = Field(min_length=1)
+
+
+class UnitTestsDraft(BaseModel):
+    """What the test-writing call must return in codetest mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Declared first for the same reason as DraftAnswer.working.
+    working: str = ""
+    # Python 3 source of a `unittest` module that imports the function from `solution`.
+    tests: str = Field(min_length=1)
+
+
 class SandboxRunSummary(BaseModel):
     """One program run in the sandbox as shown to the caller (mirrors `sandbox_runs`)."""
 
@@ -266,10 +318,13 @@ class SandboxRunSummary(BaseModel):
     environment_names: list[str]
     sandbox_removed: bool
     # agree | disagree | no_claim | program_failed | infra_failed; in a cross-check
-    # ran | program_failed | infra_failed
+    # ran | program_failed | infra_failed; in codetest mode passed | vacuous | tests_failed |
+    # solution_invalid | tests_invalid | not_finished | infra_failed
     outcome: str
     # None when the model gave no claim for this program.
     claimed_answer: str | None
+    # codetest mode: the result line the test run printed (JSON with the counts), when it
+    # printed a valid one.
     executed_answer: str | None
     # Which program of a cross-check this run belongs to: a | b. "a" outside a cross-check.
     program_label: str = "a"
@@ -424,6 +479,24 @@ class RunResult(BaseModel):
     cross_check_tier: str | None = None
     executed_answer_b: str | None = None
     cross_check_rule: str | None = None
+    # Codetest mode. `execution_status` is then tests_passed | tests_failed | untested |
+    # failed | skipped and `execution_note` says what the tests did and did not show.
+    # `code_function` and `code_signature` are the interface both writers were given.
+    # `code_solution` is the solution in the answer, `code_first_solution` the first draft
+    # (the same text unless `repaired`), `code_tests` the generated tests (None when none
+    # were written). `tests_run` and `tests_failed` count the returned solution's test run,
+    # skipped tests left out; None when it had no run with a result. `code_first_outcome`
+    # is how the first solution's run was classed (see codetest.classify_test_run), kept
+    # apart from the repaired one's.
+    code_function: str | None = None
+    code_signature: str | None = None
+    code_solution: str | None = None
+    code_first_solution: str | None = None
+    code_tests: str | None = None
+    tests_tier: str | None = None
+    tests_run: int | None = None
+    tests_failed: int | None = None
+    code_first_outcome: str | None = None
     sandbox_runs: list[SandboxRunSummary] = Field(default_factory=list)
     total_latency_ms: float
     total_cost_usd: float

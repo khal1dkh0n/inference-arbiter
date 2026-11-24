@@ -151,3 +151,15 @@ def test_shipped_config_takes_the_frontier_model_from_the_environment(monkeypatc
 
     monkeypatch.delenv("FRONTIER_MODEL")
     assert load_config(REAL_CONFIG_PATH).tiers["frontier"].model == "${FRONTIER_MODEL}"
+
+
+def test_shipped_config_writes_solution_and_tests_on_two_different_free_models():
+    config = load_config(REAL_CONFIG_PATH)
+    code_test = config.code_test
+
+    assert (code_test.interface_tier, code_test.solution_tier, code_test.tests_tier) == ("local", "mid", "local")
+    assert config.tiers[code_test.solution_tier].model != config.tiers[code_test.tests_tier].model
+    for tier_name in (code_test.interface_tier, code_test.solution_tier, code_test.tests_tier):
+        assert config.tiers[tier_name].provider == "ollama", "codetest mode makes no paid call as shipped"
+    assert code_test.max_repairs == 1
+    assert code_test.max_program_bytes > config.execute.max_program_bytes

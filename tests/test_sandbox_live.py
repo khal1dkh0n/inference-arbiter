@@ -6,6 +6,7 @@ Skipped unless `sbx` is on PATH and INFERENCE_ARBITER_LIVE_SANDBOX=1:
 
 It creates sandboxes named `inference-arbiter-<12 hex>` only, and the gate removes each one.
 It makes no model call. The canary variables it sets hold made-up strings, never a key.
+The codetest test runs the driver bundle on small sources written in this file.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import subprocess
 
 import pytest
 
-from inference_arbiter import sandbox
+from inference_arbiter import codetest, codetest_driver, sandbox
 
 pytestmark = pytest.mark.skipif(
     shutil.which("sbx") is None or os.environ.get("INFERENCE_ARBITER_LIVE_SANDBOX") != "1",
@@ -139,3 +140,60 @@ def test_typed_failures_against_the_real_cli_and_cleanup_after_each():
         assert result.sandbox_removed is True and result.sandbox_name.startswith("inference-arbiter-")
     assert len({result.sandbox_name for result in (clean, failed, slow, loud)}) == 4
     assert sandbox_names() == before
+
+
+CODETEST_SOLUTION = "def add(a, b):\n    return a + b\n"
+CODETEST_TESTS = """import unittest
+from solution import add
+
+
+class AddTests(unittest.TestCase):
+    def test_small(self):
+        self.assertEqual(add(2, 3), 5)
+
+    def test_negative(self):
+        self.assertEqual(add(-2, -3), -5)
+"""
+
+
+def test_the_codetest_bundle_runs_through_the_unchanged_gate_with_nothing_installed():
+    before = sandbox_names()
+    limits = sandbox.SandboxLimits(timeout_s=5, max_program_bytes=60_000)
+
+    def run(solution: str, tests: str = CODETEST_TESTS) -> sandbox.SandboxResult:
+        return sandbox.run_program(codetest.build_bundle(solution, tests, "add"), limits=limits)
+
+    passed = run(CODETEST_SOLUTION)
+    failed = run("def add(a, b):\n    return a - b\n")
+    broken = run("def add(a, b)\n    return a + b\n")
+    vacuous = run(CODETEST_SOLUTION, "import unittest\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertTrue(True)\n")
+    noisy = run("print('x' * 2_000_000)\n" + CODETEST_SOLUTION)
+    endless = run("def add(a, b):\n    while True:\n        pass\n")
+    print("\ncodetest live runs:")
+    for label, result in (("passed", passed), ("failed", failed), ("broken", broken), ("vacuous", vacuous),
+                          ("noisy", noisy), ("endless", endless)):
+        print(f"  {label}: exit {result.exit_code}, {result.error_type}, run {result.duration_ms:.0f} ms, "
+              f"total {result.total_ms:.0f} ms, stdout {result.stdout.strip()[:160]!r}")
+
+    assert codetest.classify_test_run(passed)[:2] == ("passed", None), (passed.error_type, passed.stderr[-500:])
+    assert (passed.status, passed.exit_code) == ("ok", codetest_driver.EXIT_PASSED)
+    assert codetest.parse_summary(passed.stdout).tests_run == 2
+
+    failed_class, _, failed_summary = codetest.classify_test_run(failed)
+    assert (failed_class, failed.exit_code) == ("tests_failed", codetest_driver.EXIT_TESTS_FAILED)
+    assert (failed_summary.ran, failed_summary.failed) == (2, 2)
+
+    assert codetest.classify_test_run(broken)[:2] == ("solution_invalid", "solution_import")
+    assert broken.exit_code == codetest_driver.EXIT_SOLUTION_INVALID
+    assert (codetest.classify_test_run(vacuous)[0], vacuous.exit_code) == ("vacuous", codetest_driver.EXIT_VACUOUS)
+    # Two million characters printed by the solution are captured in the driver: the run still has its result.
+    assert codetest.classify_test_run(noisy)[0] == "passed"
+    assert len(noisy.stdout) < 1000 and not noisy.stdout_truncated
+    assert codetest.classify_test_run(endless)[:2] == ("not_finished", "timeout")
+
+    runs = (passed, failed, broken, vacuous, noisy, endless)
+    for result in runs:
+        assert result.sandbox_removed is True and result.sandbox_name.startswith("inference-arbiter-")
+        assert result.network_policy == "deny_all"
+    assert len({result.sandbox_name for result in runs}) == len(runs)
+    assert sandbox_names() == before, "the gate must leave no sandbox behind"

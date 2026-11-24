@@ -13,6 +13,17 @@ Closed-book suite (default, eval/golden_questions.yaml):
     auto          auto mode with the computation check off: one call to auto.closed_book_tier.
     auto:check    auto mode with the computation check on: a question the check says a program
                   can compute goes to execute mode, the rest take the closed-book call.
+    codetest:<solution tier>+<tests tier>
+                  codetest mode: one tier writes a solution, the other writes unit tests
+                  without seeing it, both run in one sandbox. codetest:<tier> takes the
+                  tests tier from the config.
+
+Code set (--golden eval/code_questions.yaml): every case has match type `reference_tests`.
+Whatever the strategy, the code in the answer is run in the sandbox against the case's
+fixed reference tests, and that alone decides pass or fail. The reference files are read
+only after the answer has come back; nothing of them is ever part of a prompt. For a
+codetest strategy the scorecard also says how often the generated tests caught and
+missed a wrong solution.
 
 Open-book suite (--suite openbook, eval/openbook/questions.yaml over eval/openbook/corpus.yaml):
     openbook        the grounded pipeline (mode openbook) over the case's source documents.
@@ -46,9 +57,11 @@ from typing import Any, Callable, get_args
 import yaml
 
 import fetch_corpus
+from inference_arbiter import codetest, sandbox
 from inference_arbiter.clients import build_clients
 from inference_arbiter.config import DEFAULT_CONFIG_PATH, load_config, load_env_file
 from inference_arbiter.grading import (
+    CODE_FENCE_PATTERN,
     DEFAULT_JUDGE_TIER,
     GRADE_FAIL,
     GRADE_PASS,
@@ -61,7 +74,7 @@ from inference_arbiter.grading import (
     grade_openbook,
     normalise_whitespace,
 )
-from inference_arbiter.router import build_harness
+from inference_arbiter.router import build_harness, sandbox_limits
 from inference_arbiter.schemas import AskRequest
 
 SUITE_CLOSEDBOOK = "closedbook"
@@ -97,6 +110,20 @@ KIND_CROSSCHECK = "crosscheck"
 KIND_AUTO = "auto"
 KIND_AUTO_CHECK = "auto:check"
 MODE_EXECUTE = "execute"
+# codetest:<solution tier>+<tests tier>: a solution and unit tests written apart, run in one
+# sandbox (codetest mode). codetest:<tier> takes the tests tier from code_test.tests_tier.
+KIND_CODETEST = "codetest"
+MODE_CODETEST = "codetest"
+# Match type of the code set: the answer's code is run against fixed reference tests.
+MATCH_REFERENCE_TESTS = "reference_tests"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+# What the generated tests said about a solution, set against the reference tests.
+VERDICT_CAUGHT = "caught"
+VERDICT_MISSED = "missed"
+VERDICT_FALSE_ALARM = "false_alarm"
+VERDICT_CLEAN = "clean"
+VERDICT_UNTESTED = "untested"
+MODEL_TESTS_VERDICTS = (VERDICT_CAUGHT, VERDICT_MISSED, VERDICT_FALSE_ALARM, VERDICT_CLEAN, VERDICT_UNTESTED)
 VERDICT_NOT_RUN = "not_run"
 VERDICT_YES = "yes"
 COMPUTATION_VERDICTS = ("yes", "no", "low_confidence", "failed")
@@ -110,6 +137,7 @@ PER_PROGRAM_MATCH_TYPES = ("numeric", "exact", "contains")
 SUITE_KINDS = {
     SUITE_CLOSEDBOOK: (
         KIND_TIER, KIND_ROUTER, KIND_CHAIN, KIND_EXECUTE, KIND_CROSSCHECK, KIND_AUTO, KIND_AUTO_CHECK,
+        KIND_CODETEST,
     ),
     SUITE_OPENBOOK: (KIND_OPENBOOK, KIND_STUFFED, KIND_CLOSED),
 }
@@ -118,7 +146,7 @@ SUITE_DEFAULT_STRATEGIES = {
     SUITE_OPENBOOK: ["closed:mid", "stuffed:mid", "openbook"],
 }
 # Strategies that force one answer tier; a run that left that tier says nothing about it.
-FORCED_TIER_KINDS = (KIND_TIER, KIND_STUFFED, KIND_CLOSED, KIND_EXECUTE, KIND_CROSSCHECK)
+FORCED_TIER_KINDS = (KIND_TIER, KIND_STUFFED, KIND_CLOSED, KIND_EXECUTE, KIND_CROSSCHECK, KIND_CODETEST)
 
 MODE_OPENBOOK = "openbook"
 MODE_STUFFED = "stuffed"
@@ -173,6 +201,8 @@ class Strategy:
     tier: str | None = None
     # crosscheck only: the tier that writes program B.
     cross_check_tier: str | None = None
+    # codetest only: the tier that writes the tests; None takes code_test.tests_tier.
+    tests_tier: str | None = None
 
 
 HarnessFactory = Callable[[Strategy], Any]
@@ -193,13 +223,22 @@ def parse_strategy(text: str) -> Strategy:
         if tier_a and (tier_b or "+" not in text):
             return Strategy(name=text, kind=KIND_CROSSCHECK, tier=tier_a, cross_check_tier=tier_b or tier_a)
         raise ValueError(f"unknown strategy '{text}'; use crosscheck:<tier A>+<tier B> or crosscheck:<tier>")
+    codetest_prefix = f"{KIND_CODETEST}:"
+    if text.startswith(codetest_prefix):
+        solution_tier, _, tests_tier = text[len(codetest_prefix):].partition("+")
+        if solution_tier and (tests_tier or "+" not in text):
+            return Strategy(name=text, kind=KIND_CODETEST, tier=solution_tier, tests_tier=tests_tier or None)
+        raise ValueError(
+            f"unknown strategy '{text}'; use codetest:<solution tier>+<tests tier> or codetest:<solution tier>"
+        )
     for kind in FORCED_TIER_KINDS:
         prefix = f"{kind}:"
         if text.startswith(prefix) and len(text) > len(prefix):
             return Strategy(name=text, kind=kind, tier=text.split(":", 1)[1])
     raise ValueError(
         f"unknown strategy '{text}'; use tier:<name>, router, chain, execute:<tier>, "
-        "crosscheck:<tier A>+<tier B>, auto or auto:check (closed-book suite) or "
+        "crosscheck:<tier A>+<tier B>, codetest:<solution tier>+<tests tier>, auto or auto:check "
+        "(closed-book suite) or "
         "openbook, stuffed:<tier> or closed:<tier> (open-book suite)"
     )
 
@@ -314,6 +353,8 @@ def unsupported_reason(strategy: Strategy) -> str | None:
         return "AskRequest does not accept mode 'execute' yet; execute mode is not available in this checkout"
     if strategy.kind == KIND_CROSSCHECK and "cross_check_tier" not in AskRequest.model_fields:
         return "AskRequest has no 'cross_check_tier' field yet; the cross-check is not available in this checkout"
+    if strategy.kind == KIND_CODETEST and not harness_mode_supported(MODE_CODETEST):
+        return "AskRequest does not accept mode 'codetest' yet; codetest mode is not available in this checkout"
     if strategy.kind in (KIND_AUTO, KIND_AUTO_CHECK) and "computation_check" not in AskRequest.model_fields:
         return "AskRequest has no 'computation_check' field yet; the computation check is not available in this checkout"
     if strategy.kind == KIND_OPENBOOK and not harness_mode_supported(MODE_OPENBOOK):
@@ -362,7 +403,7 @@ def build_openbook_request(
 
 def build_request(strategy: Strategy, question: str, verifier_tier: str | None) -> AskRequest:
     overrides: dict[str, Any] = {}
-    if strategy.kind in (KIND_TIER, KIND_EXECUTE, KIND_CROSSCHECK):
+    if strategy.kind in (KIND_TIER, KIND_EXECUTE, KIND_CROSSCHECK, KIND_CODETEST):
         overrides["tier"] = strategy.tier
     if strategy.kind == KIND_TIER and "no_fallback" in AskRequest.model_fields:
         # A fallback answer is excluded from this tier's score anyway; failing fast saves
@@ -375,6 +416,8 @@ def build_request(strategy: Strategy, question: str, verifier_tier: str | None) 
             overrides["cross_check"] = False
     elif strategy.kind == KIND_CROSSCHECK:
         overrides.update(mode=MODE_EXECUTE, cross_check=True, cross_check_tier=strategy.cross_check_tier)
+    elif strategy.kind == KIND_CODETEST:
+        overrides.update(mode=MODE_CODETEST, tests_tier=strategy.tests_tier)
     elif strategy.kind in (KIND_AUTO, KIND_AUTO_CHECK):
         overrides.update(mode="auto", computation_check=strategy.kind == KIND_AUTO_CHECK)
     elif chain_mode_supported():
@@ -396,12 +439,177 @@ def _measured_tier_error(result: Any, measured_tier: str | None) -> str | None:
     return None
 
 
+# --- the code set: grading with fixed reference tests, in the sandbox ---
+
+# program text -> sandbox.SandboxResult. The real one is the dispatch gate.
+ReferenceRunner = Callable[[str], Any]
+
+
+def read_reference_file(path_text: str) -> str:
+    """A reference file of the code set. A relative path is taken from the repository root."""
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.read_text(encoding="utf-8")
+
+
+def answer_code(answer: str | None) -> str | None:
+    """The code of a plain answer: the content of its last code fence. None when it has none."""
+    fenced_blocks = CODE_FENCE_PATTERN.findall(answer or "")
+    if not fenced_blocks:
+        return None
+    return fenced_blocks[-1]
+
+
+def run_against_tests(
+    solution: str, tests_source: str, function_name: str, reference_runner: ReferenceRunner
+) -> dict[str, Any]:
+    """One sandbox run of a solution against a test module, as a plain record."""
+    result = reference_runner(codetest.build_bundle(solution, tests_source, function_name))
+    run_class, reason, summary = codetest.classify_test_run(result)
+    return {
+        "run_class": run_class,
+        "reason": reason,
+        "tests_run": summary.ran if summary else None,
+        "tests_failed": summary.failed if summary else None,
+        "failed_tests": list(summary.failed_tests) if summary else [],
+        "exit_code": result.exit_code,
+        "error_type": result.error_type,
+        "sandbox_name": result.sandbox_name,
+        "sandbox_removed": result.sandbox_removed,
+        "duration_ms": result.duration_ms,
+    }
+
+
+def reference_grade_of(run: dict[str, Any]) -> tuple[str, str]:
+    """Pass, fail or ungraded for one run against the reference tests. Returns (grade, reason).
+
+    | run class                                   | grade    |
+    |---------------------------------------------|----------|
+    | passed                                      | pass     |
+    | infra_failed (the sandbox or the gate)      | ungraded |
+    | anything else                               | fail     |
+
+    The reference tests are proven to load, to finish and to pass on a right solution
+    (tests/test_code_questions.py), so a run that failed, did not load or did not finish
+    is the solution's doing.
+    """
+    if run["run_class"] == "passed":
+        return GRADE_PASS, f"all {run['tests_run']} reference tests passed"
+    if run["run_class"] == "infra_failed":
+        return GRADE_UNGRADED, f"the reference tests could not be run in the sandbox ({run['reason']})"
+    if run["run_class"] == "tests_failed":
+        return GRADE_FAIL, f"{run['tests_failed']} of {run['tests_run']} reference tests failed"
+    return GRADE_FAIL, f"the solution did not get through the reference tests ({run['run_class']}: {run['reason']})"
+
+
+def model_tests_verdict(tests_status: str | None, reference_grade: str | None) -> str | None:
+    """What the generated tests said about a solution, set against the reference tests.
+
+    | generated tests | reference tests | verdict     |
+    |-----------------|-----------------|-------------|
+    | tests_failed    | fail            | caught      |
+    | tests_passed    | fail            | missed      |
+    | tests_failed    | pass            | false_alarm |
+    | tests_passed    | pass            | clean       |
+    | untested        | pass or fail    | untested    |
+
+    None when the reference tests gave no pass or fail, or the status is none of the three.
+    """
+    if reference_grade not in (GRADE_PASS, GRADE_FAIL):
+        return None
+    if tests_status == "untested":
+        return VERDICT_UNTESTED
+    if tests_status == "tests_failed":
+        return VERDICT_CAUGHT if reference_grade == GRADE_FAIL else VERDICT_FALSE_ALARM
+    if tests_status == "tests_passed":
+        return VERDICT_MISSED if reference_grade == GRADE_FAIL else VERDICT_CLEAN
+    return None
+
+
+# How a first run's class reads as a tests status (codetest.classify_test_run). A solution
+# that did not load was stopped before any test ran, so it has no verdict.
+_FIRST_OUTCOME_STATUS = {
+    "passed": "tests_passed",
+    "tests_failed": "tests_failed",
+    "vacuous": "untested",
+    "tests_invalid": "untested",
+    "not_finished": "untested",
+    "infra_failed": "untested",
+}
+
+
+def run_seeded_checks(
+    case: dict[str, Any], model_tests: str, reference_runner: ReferenceRunner
+) -> dict[str, Any]:
+    """Run the generated tests against the case's reference solution and its seeded bugs.
+
+    This gives the generated tests the same wrong solutions in every run, whatever the
+    solution tier happened to write.
+    """
+    function_name = case["match"]["function"]
+    seeded: dict[str, Any] = {"reference_solution": None, "broken": []}
+    if case.get("reference_solution"):
+        seeded["reference_solution"] = run_against_tests(
+            read_reference_file(case["reference_solution"]), model_tests, function_name, reference_runner
+        )
+    for broken_path in case.get("broken_solutions") or []:
+        run = run_against_tests(read_reference_file(broken_path), model_tests, function_name, reference_runner)
+        seeded["broken"].append({"path": broken_path, **run})
+    return seeded
+
+
+def apply_reference_grade(
+    record: dict[str, Any], case: dict[str, Any], result: Any, reference_runner: ReferenceRunner | None
+) -> None:
+    """Grade a code-set answer with the case's reference tests. No judge and no model call.
+
+    The reference files are read here, after the answer came back, and go to the sandbox
+    only: nothing read here is returned to the harness.
+    """
+    def graded(status: str, reason: str) -> None:
+        record.update(outcome=status, grade=status, grade_reason=reason)
+
+    if reference_runner is None:
+        graded(GRADE_UNGRADED, "no sandbox runner: reference tests need the `execute:` block")
+        return
+    is_codetest = record.get("mode") == MODE_CODETEST
+    solution = getattr(result, "code_solution", None) if is_codetest else answer_code(result.answer)
+    if not solution:
+        graded(GRADE_FAIL, "the answer holds no code block to run")
+        return
+    function_name = case["match"]["function"]
+    reference_tests = read_reference_file(case["match"]["tests"])
+    record["reference_run"] = run_against_tests(solution, reference_tests, function_name, reference_runner)
+    grade, reason = reference_grade_of(record["reference_run"])
+    graded(grade, reason)
+    if not is_codetest:
+        return
+
+    record["model_tests_verdict"] = model_tests_verdict(record.get("execution_status"), grade)
+    first_solution = getattr(result, "code_first_solution", None)
+    first_grade = grade
+    if record.get("repaired") and first_solution:
+        record["first_reference_run"] = run_against_tests(
+            first_solution, reference_tests, function_name, reference_runner
+        )
+        first_grade = reference_grade_of(record["first_reference_run"])[0]
+    record["first_reference_grade"] = first_grade
+    record["first_model_tests_verdict"] = model_tests_verdict(
+        _FIRST_OUTCOME_STATUS.get(record.get("code_first_outcome")), first_grade
+    )
+    model_tests = getattr(result, "code_tests", None)
+    if model_tests:
+        record["seeded"] = run_seeded_checks(case, model_tests, reference_runner)
+
+
 def run_case(
     harness: Any,
     strategy: Strategy,
     case: dict[str, Any],
     judge: RubricJudge | None,
     verifier_tier: str | None = None,
+    reference_runner: ReferenceRunner | None = None,
 ) -> dict[str, Any]:
     """Run one strategy on one case and grade it. Never raises for a harness failure."""
     record = blank_record(strategy, case)
@@ -421,6 +629,10 @@ def run_case(
 
     if result.status != "ok" or result.answer is None:
         record["outcome"] = OUTCOME_ERROR
+        return record
+
+    if case["match"]["type"] == MATCH_REFERENCE_TESTS:
+        apply_reference_grade(record, case, result, reference_runner)
         return record
 
     if record.get("cross_check"):
@@ -489,6 +701,28 @@ def blank_record(strategy: Strategy, case: dict[str, Any]) -> dict[str, Any]:
         "cross_check_rule": None,
         "program_a_grade": None,
         "program_b_grade": None,
+        # codetest strategies only: who wrote the tests, the counts of the returned
+        # solution's own test run, how the first solution's run was classed, and the texts
+        # themselves, so every figure can be recomputed from this record.
+        "tests_tier": None,
+        "tests_run": None,
+        "tests_failed": None,
+        "code_first_outcome": None,
+        "code_function": None,
+        "code_solution": None,
+        "code_first_solution": None,
+        "code_tests": None,
+        # Code set only (match type reference_tests): the run of the answer's code against the
+        # reference tests. For a codetest strategy also what the generated tests said about the
+        # returned solution and about the first one (caught | missed | false_alarm | clean |
+        # untested), the first solution's reference grade, and the generated tests run against
+        # the reference solution and the seeded bugs.
+        "reference_run": None,
+        "model_tests_verdict": None,
+        "first_reference_run": None,
+        "first_reference_grade": None,
+        "first_model_tests_verdict": None,
+        "seeded": None,
         # auto strategies only: why auto picked the mode, the computation check's verdict
         # (yes | no | low_confidence | failed | not_run), its confidence and the latency of
         # its call, and the case's own `computable` label when the question file has one.
@@ -557,6 +791,14 @@ def copy_result_fields(record: dict[str, Any], result: Any) -> None:
         cross_check_tier=getattr(result, "cross_check_tier", None),
         executed_answer_b=getattr(result, "executed_answer_b", None),
         cross_check_rule=getattr(result, "cross_check_rule", None),
+        tests_tier=getattr(result, "tests_tier", None),
+        tests_run=getattr(result, "tests_run", None),
+        tests_failed=getattr(result, "tests_failed", None),
+        code_first_outcome=getattr(result, "code_first_outcome", None),
+        code_function=getattr(result, "code_function", None),
+        code_solution=getattr(result, "code_solution", None),
+        code_first_solution=getattr(result, "code_first_solution", None),
+        code_tests=getattr(result, "code_tests", None),
         # Why each failed model call failed (provider text), so a refused escalation is diagnosable.
         failed_call_messages=[
             f"{call.role} {call.tier}: {call.error_message}"
@@ -765,6 +1007,8 @@ def regrade_records(
         case = cases_by_id.get(record["case_id"])
         if record.get("execution_status") == STATUS_DISPUTED:
             pass  # scored as a fail when it ran (run_case): there is no answer to grade again
+        elif record.get("match_type") == MATCH_REFERENCE_TESTS:
+            pass  # graded by a sandbox run when it ran (run_case); that run is kept as it is
         elif case is not None and record["outcome"] in ANSWERED_OUTCOMES and record["answer"]:
             apply_grade(updated, grade_answer(case, record["answer"], judge))
         regraded.append(updated)
@@ -782,11 +1026,13 @@ def run_strategies(
     verifier_tier: str | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
     case_runner: Callable[..., dict[str, Any]] | None = None,
+    reference_runner: ReferenceRunner | None = None,
 ) -> dict[str, Any]:
     """Run every strategy over every case. Stops cleanly once the cost cap is passed.
 
     case_runner(harness, strategy, case, judge) replaces the closed-book run_case; the
-    open-book suite passes one bound to its corpus.
+    open-book suite passes one bound to its corpus. reference_runner runs a program in
+    the sandbox for the code set's reference tests.
     """
     records: list[dict[str, Any]] = []
     not_runnable: dict[str, str] = {}
@@ -819,7 +1065,7 @@ def run_strategies(
                 if case_runner is not None:
                     record = case_runner(harness, strategy, case, judge)
                 else:
-                    record = run_case(harness, strategy, case, judge, verifier_tier)
+                    record = run_case(harness, strategy, case, judge, verifier_tier, reference_runner)
             except KeyboardInterrupt:
                 stopped_early = True
                 stop_reason = f"interrupted during {strategy.name} / {case['id']}"
@@ -973,6 +1219,77 @@ def summarise_execution(own_records: list[dict[str, Any]]) -> dict[str, Any] | N
     return execution
 
 
+def _rate(numerator: int, denominator: int) -> dict[str, Any]:
+    interval = wilson_interval(numerator, denominator)
+    return {
+        "count": numerator,
+        "of": denominator,
+        "rate": _accuracy(numerator, denominator),
+        "ci95": list(interval) if interval else None,
+    }
+
+
+def summarise_code_tests(own_records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """What the generated tests of a codetest strategy were worth. None for any other strategy.
+
+    Every count comes from the records. `returned` is about the solution in the answer,
+    `first_attempt` about the first solution before any repair. catch rate = caught /
+    (caught + missed): of the solutions the reference tests failed, how many the generated
+    tests failed too. false alarm rate = false_alarm / (false_alarm + clean): of the
+    solutions the reference tests passed, how many the generated tests failed.
+    `repair_fixed` and `repair_broke` compare the first and the repaired solution on the
+    reference tests. `seeded` runs each case's generated tests against the same seeded bugs.
+    """
+    runs = [record for record in own_records if record.get("mode") == MODE_CODETEST]
+    if not runs:
+        return None
+
+    def verdict_counts(field: str) -> dict[str, Any]:
+        counts = {verdict: sum(1 for record in runs if record.get(field) == verdict) for verdict in MODEL_TESTS_VERDICTS}
+        counts["no_verdict"] = sum(1 for record in runs if record.get(field) is None)
+        counts["catch_rate"] = _rate(counts[VERDICT_CAUGHT], counts[VERDICT_CAUGHT] + counts[VERDICT_MISSED])
+        counts["false_alarm_rate"] = _rate(
+            counts[VERDICT_FALSE_ALARM], counts[VERDICT_FALSE_ALARM] + counts[VERDICT_CLEAN]
+        )
+        return counts
+
+    repaired = [record for record in runs if record.get("repaired")]
+    broken_runs = [run for record in runs for run in (record.get("seeded") or {}).get("broken", [])]
+    seeded_caught = sum(1 for run in broken_runs if run["run_class"] == "tests_failed")
+    seeded_missed = sum(1 for run in broken_runs if run["run_class"] in ("passed", "vacuous"))
+    reference_runs = [
+        record["seeded"]["reference_solution"]
+        for record in runs
+        if record.get("seeded") and record["seeded"].get("reference_solution")
+    ]
+    return {
+        "runs": len(runs),
+        "returned": verdict_counts("model_tests_verdict"),
+        "first_attempt": verdict_counts("first_model_tests_verdict"),
+        "repaired": len(repaired),
+        "repair_fixed": sum(
+            1 for record in repaired
+            if record.get("first_reference_grade") == GRADE_FAIL and record["outcome"] == OUTCOME_PASS
+        ),
+        "repair_broke": sum(
+            1 for record in repaired
+            if record.get("first_reference_grade") == GRADE_PASS and record["outcome"] == OUTCOME_FAIL
+        ),
+        "seeded": {
+            "cases_with_tests": sum(1 for record in runs if record.get("seeded")),
+            "broken_runs": len(broken_runs),
+            "caught": seeded_caught,
+            "missed": seeded_missed,
+            "no_result": len(broken_runs) - seeded_caught - seeded_missed,
+            "catch_rate": _rate(seeded_caught, seeded_caught + seeded_missed),
+            "tests_reject_reference_solution": sum(
+                1 for run in reference_runs if run["run_class"] == "tests_failed"
+            ),
+            "tests_pass_reference_solution": sum(1 for run in reference_runs if run["run_class"] == "passed"),
+        },
+    }
+
+
 def summarise_computation_check(own_records: list[dict[str, Any]]) -> dict[str, Any] | None:
     """What the computation check did over a strategy's runs. None when it never ran.
 
@@ -1082,6 +1399,7 @@ def summarise_strategy(strategy_name: str, records: list[dict[str, Any]]) -> dic
         ),
         **summarise_escalations(own_records),
         "execution": summarise_execution(own_records),
+        "code_tests": summarise_code_tests(own_records),
         "computation_check": summarise_computation_check(own_records),
         "by_category": by_category,
     }
@@ -1516,6 +1834,72 @@ def print_execution(summaries: list[dict[str, Any]]) -> None:
         )
 
 
+def _rate_text(rate: dict[str, Any]) -> str:
+    if rate["rate"] is None:
+        return "n/a (0)"
+    interval = rate["ci95"]
+    return f"{rate['count']}/{rate['of']} = {rate['rate'] * 100:.0f}% ({interval[0] * 100:.0f}-{interval[1] * 100:.0f}%)"
+
+
+def print_code_tests(summaries: list[dict[str, Any]]) -> None:
+    testing = [summary for summary in summaries if summary.get("code_tests")]
+    if not testing:
+        return
+    print(
+        "\nGenerated tests against the reference tests (codetest strategies; the reference tests "
+        "alone decide pass and fail above. caught: generated tests failed, reference tests failed. "
+        "missed: generated passed, reference failed. false alarm: generated failed, reference "
+        "passed. clean: both passed. untested: the solution was returned without a test run that "
+        "could fail it. no verdict: no answer, or the reference tests could not be run. "
+        "'returned' is the solution in the answer, 'first' the first solution before any repair; "
+        "rates carry a 95% Wilson interval)\n"
+    )
+    rows = []
+    for summary in testing:
+        for label, field in (("returned", "returned"), ("first", "first_attempt")):
+            counts = summary["code_tests"][field]
+            rows.append(
+                [
+                    summary["strategy"], label,
+                    counts[VERDICT_CAUGHT], counts[VERDICT_MISSED], counts[VERDICT_FALSE_ALARM],
+                    counts[VERDICT_CLEAN], counts[VERDICT_UNTESTED], counts["no_verdict"],
+                    _rate_text(counts["catch_rate"]), _rate_text(counts["false_alarm_rate"]),
+                ]
+            )
+    print_table(
+        ["strategy", "solution", "caught", "missed", "false alarm", "clean", "untested", "no verdict",
+         "catch rate", "false alarm rate"],
+        rows,
+    )
+    print(
+        "\nRepairs and seeded bugs (repair fixed: the first solution failed the reference tests and "
+        "the repaired one passed. repair broke: the reverse. seeded: each case's generated tests "
+        "run against that case's seeded wrong solutions and its reference solution)\n"
+    )
+    print_table(
+        ["strategy", "repaired", "repair fixed", "repair broke", "cases with tests", "seeded runs",
+         "seeded caught", "seeded missed", "seeded no result", "seeded catch rate",
+         "tests pass reference solution", "tests reject reference solution"],
+        [
+            [
+                summary["strategy"],
+                summary["code_tests"]["repaired"],
+                summary["code_tests"]["repair_fixed"],
+                summary["code_tests"]["repair_broke"],
+                summary["code_tests"]["seeded"]["cases_with_tests"],
+                summary["code_tests"]["seeded"]["broken_runs"],
+                summary["code_tests"]["seeded"]["caught"],
+                summary["code_tests"]["seeded"]["missed"],
+                summary["code_tests"]["seeded"]["no_result"],
+                _rate_text(summary["code_tests"]["seeded"]["catch_rate"]),
+                summary["code_tests"]["seeded"]["tests_pass_reference_solution"],
+                summary["code_tests"]["seeded"]["tests_reject_reference_solution"],
+            ]
+            for summary in testing
+        ],
+    )
+
+
 def print_computation_check(summaries: list[dict[str, Any]]) -> None:
     checking = [summary for summary in summaries if summary.get("computation_check")]
     if not checking:
@@ -1592,6 +1976,7 @@ def print_scorecard(scorecard: dict[str, Any], case_count: int) -> None:
     )
     print_escalation_costs(summaries)
     print_execution(summaries)
+    print_code_tests(summaries)
     print_computation_check(summaries)
 
     categories: list[str] = []
@@ -1839,7 +2224,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--suite", choices=[SUITE_CLOSEDBOOK, SUITE_OPENBOOK], default=SUITE_CLOSEDBOOK,
                         help="closedbook: the golden set (default). openbook: questions over supplied sources")
     parser.add_argument("--strategies", nargs="+",
-                        help="closedbook: tier:<name>, router, chain, execute:<tier>, crosscheck:<tier A>+<tier B>, auto, auto:check (default: tier:local tier:mid router). "
+                        help="closedbook: tier:<name>, router, chain, execute:<tier>, crosscheck:<tier A>+<tier B>, codetest:<solution tier>+<tests tier>, auto, auto:check (default: tier:local tier:mid router). "
                         "openbook: openbook, stuffed:<tier>, closed:<tier> (default: closed:mid stuffed:mid openbook)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--golden", help="question file (default: eval/golden_questions.yaml, or "
@@ -1886,7 +2271,7 @@ def main(argv: list[str] | None = None) -> int:
         tier
         for strategy in strategies
         if strategy.kind in FORCED_TIER_KINDS
-        for tier in (strategy.tier, strategy.cross_check_tier)
+        for tier in (strategy.tier, strategy.cross_check_tier, strategy.tests_tier)
         if tier is not None and tier not in config.answer_tier_names()
     ]
     if unknown_tiers:
@@ -1916,6 +2301,15 @@ def main(argv: list[str] | None = None) -> int:
     judge = LlmRubricJudge(
         build_clients(config)[judge_tier_config.provider], judge_tier_config, arguments.judge_tier
     )
+
+    reference_runner: ReferenceRunner | None = None
+    if config.execute is not None and any(case["match"]["type"] == MATCH_REFERENCE_TESTS for case in cases):
+        reference_limits = sandbox_limits(
+            config.execute, config.code_test.max_program_bytes if config.code_test else None
+        )
+
+        def reference_runner(program: str) -> Any:
+            return sandbox.run_program(program, limits=reference_limits)
 
     db_path = Path(arguments.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1977,6 +2371,7 @@ def main(argv: list[str] | None = None) -> int:
             verifier_tier=arguments.verifier_tier,
             progress=_progress_line,
             case_runner=openbook_case_runner if openbook_suite else None,
+            reference_runner=reference_runner,
         )
 
     all_records, merged_files, merge_warnings = merge_prior_records(run["records"], arguments.merge, golden_info)

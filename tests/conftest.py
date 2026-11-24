@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from inference_arbiter import sandbox
+from inference_arbiter import codetest, sandbox
 from inference_arbiter.clients import ChatCall, EmbedCall, EmbedResult
 from inference_arbiter.config import HarnessConfig
 from inference_arbiter.router import Harness
@@ -198,6 +200,41 @@ class FakeSandboxRunner:
 
 def program_output(stdout: str = "", stderr: str = "", exit_code: int | None = 0, **fields) -> sandbox.CommandResult:
     return sandbox.CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr, duration_s=0.2, **fields)
+
+
+def run_program_on_host(tmp_path, program: str) -> sandbox.SandboxResult:
+    """Run one program the way the gate does (`python3 -I -B program.py`), without a sandbox.
+
+    Only for programs built from sources the tests themselves hold.
+    """
+    program_path = tmp_path / "program.py"
+    program_path.write_text(program, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", str(program_path)], capture_output=True, text=True, timeout=60, cwd=tmp_path
+    )
+    command = sandbox.CommandResult(
+        exit_code=completed.returncode, stdout=completed.stdout, stderr=completed.stderr, duration_s=0.1
+    )
+    error_type, timed_out = sandbox.classify_run(command, timeout_s=60)
+    return sandbox_result(error_type, completed.stdout, completed.returncode, completed.stderr, timed_out)
+
+
+def run_on_host(tmp_path, solution: str, tests: str, function_name: str = "add") -> sandbox.SandboxResult:
+    """Run a solution against a test module through the codetest driver, on the host interpreter."""
+    return run_program_on_host(tmp_path, codetest.build_bundle(solution, tests, function_name))
+
+
+def sandbox_result(
+    error_type: str | None = None, stdout: str = "", exit_code: int | None = 0, stderr: str = "",
+    timed_out: bool = False,
+) -> sandbox.SandboxResult:
+    return sandbox.SandboxResult(
+        status="ok" if error_type is None else "error", error_type=error_type, error_message=None,
+        runner="python", sandbox_name="inference-arbiter-test", exit_code=exit_code,
+        stdout=stdout, stderr=stderr, stdout_truncated=False, stderr_truncated=False, timed_out=timed_out,
+        duration_ms=1.0, total_ms=2.0, network_policy="deny_all", environment_names=("PATH",),
+        sandbox_removed=True,
+    )
 
 
 class HarnessKit:

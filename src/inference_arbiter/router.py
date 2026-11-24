@@ -5,8 +5,9 @@ one fallback hop. In chain mode the selected tier writes a draft that goes throu
 verification chain in chain.py. In openbook mode the configured drafter answers from
 the caller's sources through the grounded pipeline in openbook.py; stuffed mode is its
 one-call baseline. In execute mode the configured tier writes a program that runs in a
-sandbox (execute.py, sandbox.py). A failed run returns an explicit error; an answer is
-never invented.
+sandbox (execute.py, sandbox.py). In codetest mode one tier writes a solution, another
+writes unit tests without seeing it, and both run in one sandbox (codetest.py). A failed
+run returns an explicit error; an answer is never invented.
 """
 
 from __future__ import annotations
@@ -22,10 +23,11 @@ from typing import Any
 
 import httpx
 
-from inference_arbiter import auto, chain, computation_check, execute, openbook, sandbox
+from inference_arbiter import auto, chain, codetest, computation_check, execute, openbook, sandbox
 from inference_arbiter.clients import ERROR_TIMEOUT, ChatCall, ChatClient, build_clients
 from inference_arbiter.config import (
     DEFAULT_CONFIG_PATH,
+    ExecuteConfig,
     HarnessConfig,
     TierConfig,
     load_config,
@@ -88,6 +90,10 @@ class ExecuteNotConfiguredError(ValueError):
     """Raised when execute mode is requested but the config has no execute block."""
 
 
+class CodeTestNotConfiguredError(ValueError):
+    """Raised when codetest mode is requested but the config has no code_test block."""
+
+
 @dataclass
 class _RunOutcome:
     """What either mode hands to the shared telemetry and result code."""
@@ -128,6 +134,15 @@ class _RunOutcome:
     cross_check_tier: str | None = None
     executed_answer_b: str | None = None
     cross_check_rule: str | None = None
+    code_function: str | None = None
+    code_signature: str | None = None
+    code_solution: str | None = None
+    code_first_solution: str | None = None
+    code_tests: str | None = None
+    tests_tier: str | None = None
+    tests_run: int | None = None
+    tests_failed: int | None = None
+    code_first_outcome: str | None = None
     sandbox_records: list[SandboxRunRecord] = field(default_factory=list)
     call_records: list[CallRecord] = field(default_factory=list)
     call_messages: list[str | None] = field(default_factory=list)
@@ -197,6 +212,21 @@ def build_answer_call(
         json_schema=json_schema,
         input_price_per_mtok=tier.input_price_per_mtok,
         output_price_per_mtok=tier.output_price_per_mtok,
+    )
+
+
+def sandbox_limits(execute_config: ExecuteConfig, max_program_bytes: int | None = None) -> sandbox.SandboxLimits:
+    """The limits of one sandbox run, from the execute block. Codetest mode passes its own
+    program size cap; everything else is shared."""
+    return sandbox.SandboxLimits(
+        timeout_s=execute_config.timeout_s,
+        max_output_bytes=execute_config.max_output_bytes,
+        max_program_bytes=max_program_bytes or execute_config.max_program_bytes,
+        cpus=execute_config.cpus,
+        memory=execute_config.memory,
+        create_timeout_s=execute_config.create_timeout_s,
+        sbx_path=execute_config.sbx_path,
+        network_canary=execute_config.network_canary,
     )
 
 
@@ -573,20 +603,108 @@ class Harness:
         )
         return self._outcome_from_openbook(stuffed_outcome)
 
+    def _answer_codetest(
+        self, request: AskRequest, selected_tier: str, answer_messages: list[dict[str, str]]
+    ) -> _RunOutcome:
+        code_test_config = self._config.code_test
+        limits = sandbox_limits(self._config.execute, code_test_config.max_program_bytes)
+        tests_tier = request.tests_tier or code_test_config.tests_tier
+
+        def run_in_sandbox(program: str) -> sandbox.SandboxResult:
+            return sandbox.run_program(
+                program, sandbox.RUNNER_PYTHON, limits, command_runner=self._sandbox_runner
+            )
+
+        simulated_failure = None
+        if request.simulate == "answer-error":
+            simulated_failure = lambda: _simulated_failure(ERROR_SIMULATED_ERROR)  # noqa: E731
+        solution_caller = self._plain_tier_caller(think_override=code_test_config.think)
+        codetest_outcome = codetest.run_codetest(
+            question=last_user_text(request.messages),
+            conversation=answer_messages,
+            interface_tier=code_test_config.interface_tier,
+            solution_tier=selected_tier,
+            tests_tier=tests_tier,
+            tests_writer=f"tier {tests_tier}, model {self._config.tiers[tests_tier].model}",
+            max_repairs=code_test_config.max_repairs,
+            effort_override=request.effort,
+            call_interface_tier=self._plain_tier_caller(),
+            call_solution_tier=solution_caller,
+            # The tests tier keeps its own `think` setting, also when it is the solution tier.
+            call_tests_tier=self._plain_tier_caller(),
+            run_in_sandbox=run_in_sandbox,
+            simulated_answer_failure=simulated_failure,
+            parallel=code_test_config.parallel,
+        )
+
+        call_records: list[CallRecord] = []
+        call_messages: list[str | None] = []
+        for step in codetest_outcome.steps:
+            call_records.append(
+                self._make_call_record(
+                    0, step.role, step.tier, step.effort, step.result, "invalid" if step.invalid else None
+                )
+            )
+            call_messages.append(step.result.error_message)
+
+        sandbox_records = [
+            SandboxRunRecord(
+                seq=position + 1,
+                attempt=attempt.attempt,
+                sandbox_name=attempt.result.sandbox_name,
+                runner=attempt.result.runner,
+                program=attempt.program,
+                claimed_answer=None,
+                executed_answer=attempt.result_line,
+                status=attempt.result.status,
+                error_type=attempt.result.error_type,
+                exit_code=attempt.result.exit_code,
+                stdout=attempt.result.stdout,
+                stderr=attempt.result.stderr,
+                stdout_truncated=attempt.result.stdout_truncated,
+                stderr_truncated=attempt.result.stderr_truncated,
+                duration_ms=attempt.result.duration_ms,
+                total_ms=attempt.result.total_ms,
+                timed_out=attempt.result.timed_out,
+                network_policy=attempt.result.network_policy,
+                environment_names=json.dumps(list(attempt.result.environment_names)),
+                sandbox_removed=attempt.result.sandbox_removed,
+                outcome=attempt.outcome,
+            )
+            for position, attempt in enumerate(codetest_outcome.attempts)
+        ]
+        return _RunOutcome(
+            status=codetest_outcome.status,
+            answer=codetest_outcome.answer,
+            error_type=codetest_outcome.error_type,
+            error_message=codetest_outcome.error_message,
+            final_tier=selected_tier,
+            final_effort=codetest_outcome.final_effort,
+            fallback_used=False,
+            fallback_skipped_reason=None,
+            repaired=codetest_outcome.repaired,
+            repair_error_type=codetest_outcome.repair_error_type,
+            execution_status=codetest_outcome.execution_status,
+            execution_note=codetest_outcome.execution_note,
+            code_function=codetest_outcome.function_name,
+            code_signature=codetest_outcome.signature,
+            code_solution=codetest_outcome.solution,
+            code_first_solution=codetest_outcome.first_solution,
+            code_tests=codetest_outcome.tests,
+            tests_tier=tests_tier,
+            tests_run=codetest_outcome.tests_run,
+            tests_failed=codetest_outcome.tests_failed,
+            code_first_outcome=codetest_outcome.first_outcome,
+            sandbox_records=sandbox_records,
+            call_records=call_records,
+            call_messages=call_messages,
+        )
+
     def _answer_execute(
         self, request: AskRequest, selected_tier: str, answer_messages: list[dict[str, str]]
     ) -> _RunOutcome:
         execute_config = self._config.execute
-        limits = sandbox.SandboxLimits(
-            timeout_s=execute_config.timeout_s,
-            max_output_bytes=execute_config.max_output_bytes,
-            max_program_bytes=execute_config.max_program_bytes,
-            cpus=execute_config.cpus,
-            memory=execute_config.memory,
-            create_timeout_s=execute_config.create_timeout_s,
-            sbx_path=execute_config.sbx_path,
-            network_canary=execute_config.network_canary,
-        )
+        limits = sandbox_limits(execute_config)
 
         def run_in_sandbox(program: str) -> sandbox.SandboxResult:
             return sandbox.run_program(
@@ -781,6 +899,13 @@ class Harness:
             grounding_verifier_name = self._resolve_grounding_verifier_tier(request)
         if request.mode == "execute" and config.execute is None:
             raise ExecuteNotConfiguredError("execute mode needs an `execute:` block in the config")
+        if request.mode == "codetest" and config.code_test is None:
+            raise CodeTestNotConfiguredError("codetest mode needs a `code_test:` block in the config")
+        if request.tests_tier is not None and request.tests_tier not in config.answer_tier_names():
+            raise UnknownTierError(
+                f"tests tier '{request.tests_tier}' is not an answer tier; "
+                f"choose one of {sorted(config.answer_tier_names())}"
+            )
         if request.cross_check_tier is not None and request.cross_check_tier not in config.answer_tier_names():
             raise UnknownTierError(
                 f"cross-check tier '{request.cross_check_tier}' is not an answer tier; "
@@ -797,8 +922,8 @@ class Harness:
             )
             call_messages.append(check.call.error_message)
 
-        if request.mode in ("openbook", "execute") or auto_reason is not None:
-            # The tier is config-selected: openbook, execute and auto make no triage call.
+        if request.mode in ("openbook", "execute", "codetest") or auto_reason is not None:
+            # The tier is config-selected: openbook, execute, codetest and auto make no triage call.
             triage = TriageOutcome(status="skipped")
         else:
             triage = self._triage(request)
@@ -812,6 +937,8 @@ class Harness:
             selected_tier, route_reason = config.openbook.drafter_tier, "configured"
         elif request.mode == "execute" and request.tier is None:
             selected_tier, route_reason = config.execute.tier, "configured"
+        elif request.mode == "codetest" and request.tier is None:
+            selected_tier, route_reason = config.code_test.solution_tier, "configured"
         elif auto_reason is not None and request.tier is None:
             selected_tier, route_reason = config.auto_closed_book_tier(), "auto"
         else:
@@ -826,6 +953,8 @@ class Harness:
             outcome = self._answer_chain(request, selected_tier, answer_messages, verifier_tier_name)
         elif request.mode == "execute":
             outcome = self._answer_execute(request, selected_tier, answer_messages)
+        elif request.mode == "codetest":
+            outcome = self._answer_codetest(request, selected_tier, answer_messages)
         else:
             outcome = self._answer_route(request, selected_tier, answer_messages)
 
@@ -972,6 +1101,15 @@ class Harness:
             cross_check_tier=outcome.cross_check_tier,
             executed_answer_b=outcome.executed_answer_b,
             cross_check_rule=outcome.cross_check_rule,
+            code_function=outcome.code_function,
+            code_signature=outcome.code_signature,
+            code_solution=outcome.code_solution,
+            code_first_solution=outcome.code_first_solution,
+            code_tests=outcome.code_tests,
+            tests_tier=outcome.tests_tier,
+            tests_run=outcome.tests_run,
+            tests_failed=outcome.tests_failed,
+            code_first_outcome=outcome.code_first_outcome,
             sandbox_runs=[
                 SandboxRunSummary(
                     seq=record.seq,
