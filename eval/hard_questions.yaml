@@ -34,6 +34,7 @@ cases:
       value: 18750
       tolerance: 0
     category: executable
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HX-01.py
@@ -57,6 +58,7 @@ cases:
       value: 43
       tolerance: 0
     category: executable
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HX-02.py
@@ -93,6 +95,7 @@ cases:
         - "0001875000000000000000082600800080000978271122003C91A7E2444F452F4A00000000000000000022300554524D30"
         - "00 01 87 50 00 00 00 00 00 00 00 08 26 00 80 00 80 00 09 78 27 11 22 00 3C 91 A7 E2 44 4F 45 2F 4A 00 00 00 00 00 00 00 00 00 22 30 05 54 52 4D 30"
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-03.py
@@ -115,6 +118,7 @@ cases:
       value: 41400128
       tolerance: 0
     category: executable
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HX-04.py
@@ -133,6 +137,7 @@ cases:
       value: 41925
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-07.py
@@ -151,6 +156,7 @@ cases:
       value: 69
       tolerance: 0
     category: executable
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HX-08.py
@@ -175,6 +181,7 @@ cases:
       value: 5610
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-10.py
@@ -202,6 +209,7 @@ cases:
       value: 205527
       tolerance: 0
     category: executable
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HX-11.py
@@ -251,6 +259,7 @@ cases:
       value: 25775
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-12.py
@@ -289,6 +298,7 @@ cases:
       value: 32689
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-13.py
@@ -310,6 +320,7 @@ cases:
       value: 52846013
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-14.py
@@ -347,6 +358,7 @@ cases:
       value: 42116
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-15.py
@@ -368,6 +380,7 @@ cases:
       value: 3174140192
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-16.py
@@ -386,6 +399,7 @@ cases:
       value: 2728216525
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-17.py
@@ -404,6 +418,7 @@ cases:
       value: 4118473
       tolerance: 0
     category: executable
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HX-18.py
@@ -425,6 +440,7 @@ cases:
       value: 4405
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HR-08.py
@@ -489,6 +505,7 @@ cases:
         - "Y, Y, N, N, Y"
         - "Y,Y,N,N,Y"
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HR-09.py
@@ -520,6 +537,7 @@ cases:
       value: 58.85
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HR-10.py
@@ -543,6 +561,7 @@ cases:
       value: 120
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HR-11.py
@@ -582,6 +601,7 @@ cases:
       value: 380
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HR-12.py
@@ -618,6 +638,7 @@ cases:
       value: 8
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     reference: eval/hard_reference/HR-13.py
@@ -672,6 +693,7 @@ cases:
         - "00A0A08000, ARQC, AAC"
         - "00 A0 A0 80 00, ARQC, AAC"
     category: domain
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HD-03.py
@@ -697,6 +719,7 @@ cases:
         - "19 May 2028"
         - "May 19, 2028"
     category: domain
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HD-04.py
@@ -733,6 +756,7 @@ cases:
         - The answer does not present a service fee as payable for this batch; it says the batch must be rejected or that no fee is charged (mentioning what 0.35% of a figure would be, clearly marked as not applicable, is allowed).
       pass_rule: all criteria met
     category: trap
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HT-04.py
@@ -758,6 +782,7 @@ cases:
         - The answer does not give 24990 (or 249.90) as the amount to post; if it mentions that figure it says it must not be used.
       pass_rule: all criteria met
     category: trap
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HT-05.py
@@ -791,6 +816,7 @@ cases:
         - The answer gives the cause - Java integer division truncates toward zero so the remainder is negative, and the loop that distributes the remainder does not run.
       pass_rule: all criteria met
     category: trap
+    computable: true
     expected_route: mid
     difficulty: hard
     reference: eval/hard_reference/HT-06.py

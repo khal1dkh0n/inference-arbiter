@@ -10,6 +10,7 @@ cases:
       type: contains
       any_of: [Canberra]
     category: lookup
+    computable: false
     expected_route: local
     difficulty: easy
     notes: Classic where a weak model says Sydney. Baseline sanity check for the local tier.
@@ -20,6 +21,7 @@ cases:
     match:
       type: exact
     category: lookup
+    computable: false
     expected_route: local
     difficulty: easy
     notes: Symbol does not match the English name. Exact match on a one-token answer, tests answer-format discipline (answer should be just the symbol).
@@ -30,6 +32,7 @@ cases:
     match:
       type: exact
     category: lookup
+    computable: false
     expected_route: local
     difficulty: easy
     notes: Single-word answer after case-insensitive, punctuation-stripped normalization.
@@ -41,6 +44,7 @@ cases:
       type: contains
       any_of: ["not found", "could not be found", "cannot be found", "can't be found", "couldn't be found", "cannot find", "could not find"]
     category: lookup
+    computable: false
     expected_route: local
     difficulty: easy
     notes: Stable protocol definition (RFC 9110). Cheap local win.
@@ -53,6 +57,7 @@ cases:
       all_of: ["domain name system"]
       any_of: ["ip address", "ip addresses"]
     category: lookup
+    computable: false
     expected_route: local
     difficulty: easy
     notes: Two-part definition, checks the local model completes both parts.
@@ -64,6 +69,7 @@ cases:
       type: contains
       any_of: ["Jane Austen", "Austen"]
     category: lookup
+    computable: false
     expected_route: local
     difficulty: easy
     notes: Stable literary fact, low-cost control that should never escalate.
@@ -82,6 +88,7 @@ cases:
     match:
       type: exact
     category: code
+    computable: true
     expected_route: code
     difficulty: medium
     notes: Mutable default argument. All calls without an explicit list share one list, and print runs after all four calls, so the first two show the final contents. Verified by running it. Whitespace is normalized before comparing.
@@ -96,6 +103,7 @@ cases:
     match:
       type: exact
     category: code
+    computable: true
     expected_route: code
     difficulty: medium
     notes: Extended slicing with a negative step. s[1:7:2] is bdf and s[::-3] is heb. Verified by running it.
@@ -118,6 +126,7 @@ cases:
       value: 0
       tolerance: 0
     category: code
+    computable: true
     expected_route: code
     difficulty: hard
     notes: NOT IN against a subquery containing NULL yields UNKNOWN for every row, so the count is 0, not 3. Verified in sqlite3 (also returns 3 once the NULL is filtered out).
@@ -140,6 +149,7 @@ cases:
       value: 2
       tolerance: 0
     category: code
+    computable: true
     expected_route: code
     difficulty: medium
     notes: The WHERE on the right-hand table turns the LEFT JOIN into an inner join, leaving the two paid rows. Verified in sqlite3 (moving the condition into ON gives 4, dropping it gives 5).
@@ -153,6 +163,7 @@ cases:
     match:
       type: exact
     category: code
+    computable: false
     expected_route: code
     difficulty: medium
     notes: Array.prototype.sort with no comparator sorts by string value, so numbers sort lexicographically. Verified by running it in node.
@@ -166,6 +177,7 @@ cases:
       value: 38111503
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: mid
     difficulty: medium
     notes: Multi-digit multiplication that small models often get subtly wrong. Exact integer required. Candidate for a Phase 3 Python-runner check.
@@ -181,6 +193,7 @@ cases:
       value: 2817.06
       tolerance: 0.01
     category: reasoning
+    computable: true
     expected_route: mid
     difficulty: medium
     notes: 2500 * 1.01^12 = 2817.0626. Tests correct period count (12) and rate per period. Common error is using 4 percent annually (2812.16).
@@ -197,6 +210,7 @@ cases:
       value: 270
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: mid
     difficulty: medium
     notes: Head start 90 km, closing speed 30 km/h, 3 hours, so 90 km/h * 3 h = 270 km (catch-up at 13:30). Confusing the time gap with the distance gap is the usual error.
@@ -211,6 +225,7 @@ cases:
       value: 401
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: mid
     difficulty: hard
     notes: Inclusion-exclusion with an exclusion. 333 + 200 - 66 = 467 for "3 or 5", minus the 66 multiples of 15 gives 401. Verified with a brute-force loop.
@@ -225,6 +240,7 @@ cases:
       value: 219
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     notes: Subtract 1 from the first digit and count non-negative solutions of a sum of 9 over four digits, C(12,3) = 220, then remove the one solution where the first digit would be 10, giving 219. Verified by brute-force enumeration. Included as the frontier-tier reasoning probe; the expected route is a hypothesis to be tested in Phase 2.
@@ -242,6 +258,7 @@ cases:
         - States that the chip card (ICC / card application) generates it, not the terminal, acquirer or issuer.
       pass_rule: all criteria met
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: Core EMV concept. Wrong answers often credit the terminal or issuer with generating it. The issuer validates it, which a good answer may also mention.
@@ -255,6 +272,7 @@ cases:
       type: contains
       all_of: ["0210"]
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: Version digit 0, class 2 (financial), function 1 (request response), origin 0. Version pinned to 1987 because the 1993 and 2003 editions use different leading digits.
@@ -268,6 +286,7 @@ cases:
       type: contains
       any_of: ["pain.001"]
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: pain.001 is customer-to-bank initiation, as opposed to pacs.008 which is bank-to-bank. Version suffix (for example .001.09) is not required.
@@ -284,6 +303,7 @@ cases:
         - Does not state that the merchant pays the issuer directly or that the issuer pays the acquirer.
       pass_rule: all criteria met
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: Card payment flow fundamentals. The merchant pays the acquirer a merchant discount rate that funds interchange, which a good answer may mention but is not required.
@@ -297,6 +317,7 @@ cases:
       type: contains
       all_of: ["tools", "resources", "prompts"]
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: Server-side primitives are stable across protocol revisions. Client-side features (sampling, roots, elicitation) are a different set, so a model that lists those fails.
@@ -313,6 +334,7 @@ cases:
         - Names keeping the current model and tuning reasoning effort as the alternative, or switching only when the expected accuracy gain outweighs the cache loss.
       pass_rule: all criteria met
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: Mirrors the project's own design principle, so the harness should answer its own domain correctly. Rubric-scored because many phrasings are valid.
@@ -331,6 +353,7 @@ cases:
         - Does not invent a fourth opening packet.
       pass_rule: all criteria met
     category: trap
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: False premise. Confident-wrong models will fabricate four packet contents. Correct behaviour is to flag the error.
@@ -346,6 +369,7 @@ cases:
         - Does not present one specific converted figure as the definitive answer without any caveat.
       pass_rule: all criteria met
     category: trap
+    computable: false
     expected_route: local
     difficulty: medium
     notes: Ambiguous and also requires live data. Correct behaviour is to ask or state assumptions. Tests whether triage lets a plain-looking question through to a local model that bluffs a rate.
@@ -361,6 +385,7 @@ cases:
         - Does not state or guess any amount.
       pass_rule: all criteria met
     category: trap
+    computable: false
     expected_route: local
     difficulty: easy
     notes: Unanswerable because the referenced context is missing. Any specific amount is a hallucination.
@@ -374,6 +399,7 @@ cases:
       value: 937
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: frontier
     difficulty: hard
     notes: Two interacting constraints with no closed form. Computed by brute force in python3.
@@ -386,6 +412,7 @@ cases:
       value: 7350
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: mid
     difficulty: hard
     notes: Arrange M, IIII, PP (7!/(4!2!) = 105), then place the four S in 4 of the 8 gaps (70). Confirmed by enumerating all 34650 arrangements in python3.
@@ -398,6 +425,7 @@ cases:
       value: 807
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: mid
     difficulty: hard
     notes: pow(7, 2025, 1000) in python3 is 807.
@@ -410,6 +438,7 @@ cases:
       value: 3156
       tolerance: 0
     category: reasoning
+    computable: true
     expected_route: mid
     difficulty: medium
     notes: Date difference across two leap days (2024, 2028). Computed with python3 datetime.
@@ -427,6 +456,7 @@ cases:
     match:
       type: exact
     category: code
+    computable: true
     expected_route: code
     difficulty: medium
     notes: In-place += mutates the list b also names; a = a + [5] rebinds a to a new list. Verified by running it.
@@ -440,6 +470,7 @@ cases:
     match:
       type: exact
     category: code
+    computable: false
     expected_route: code
     difficulty: medium
     notes: map passes the index as the radix, so parseInt("2", 1) and parseInt("3", 2) are NaN. Verified in node.
@@ -462,6 +493,7 @@ cases:
       value: 4
       tolerance: 0
     category: code
+    computable: true
     expected_route: code
     difficulty: medium
     notes: Row 1 joins twice, rows 2 and 3 survive as NULL-extended rows. Verified in sqlite3.
@@ -475,6 +507,7 @@ cases:
       type: contains
       all_of: ["9f36"]
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: EMV Book 3, data elements dictionary. The ATC is tag 9F36, two bytes, incremented by the card on every transaction.
@@ -489,6 +522,7 @@ cases:
       type: contains
       all_of: ["pacs.004"]
     category: domain
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: pacs.004 PaymentReturn. Distractors are pacs.002 (status report), pacs.007 (reversal, initiated by the original instructing side) and camt.056 (the recall request that precedes a return).
@@ -503,6 +537,7 @@ cases:
         - Does not invent a reason for a removal that did not happen.
       pass_rule: all criteria met
     category: trap
+    computable: false
     expected_route: mid
     difficulty: medium
     notes: False premise. Python 3 removed the cmp argument of sort, which a model can stretch into the claimed removal.
@@ -518,6 +553,7 @@ cases:
         - Does not present a single driving time as the definitive answer without that caveat.
       pass_rule: all criteria met
     category: trap
+    computable: false
     expected_route: local
     difficulty: medium
     notes: Ambiguous without context. Correct behaviour is to ask or to state the assumption.

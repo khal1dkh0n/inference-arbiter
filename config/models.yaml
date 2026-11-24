@@ -209,6 +209,7 @@ chain:
 # Auto mode, the default of `ask`: the harness picks the strategy the Phase 2 evals measured
 # best (eval/results/2026-11-22-phase2-final.md). The whole rule is auto.decide_mode.
 #   no sources                          one call to closed_book_tier, no triage, no chain
+#   no sources, computation check yes   execute mode (computation_check, see below)
 #   --sources that fit                  stuffed: one call with the full text of every source
 #   --sources that do not fit           the openbook pipeline below
 #   --sources with --require-citations  the openbook pipeline, whatever the size
@@ -218,9 +219,40 @@ chain:
 #   stuffed_fill_ratio   sources fit when the estimated stuffed prompt (chars / 4) is at or under
 #                        this share of the answering tier's context_window_tokens. A tier without
 #                        context_window_tokens is treated as not fitting
+#   computation_check    true | false (default when unset): before the closed-book call, one call asks
+#                        computation_check_tier a typed yes/no question with a confidence: can a
+#                        short standard-library Python program compute the answer
+#                        (src/inference_arbiter/computation_check.py). A confident yes sends the
+#                        question to execute mode on execute.tier; anything else (no, a yes below
+#                        the threshold, a timeout, an error, invalid output) is the closed-book
+#                        call as before. Never run for a request with sources or with --tier.
+#                        When execution then fails outright (no program ran), the answer is the
+#                        closed-book call, marked NOT VERIFIED. --computation-check /
+#                        --no-computation-check. Needs the `execute:` block
+#                        Measured 2026-11-24 with the check on `local`, one run each
+#                        (eval/results/2026-11-24-auto-execute.md): golden set 35/36 with
+#                        and without it, 17 of 36 sent, all verified and right, 0.78 s
+#                        median added to the rest; hard set 25 of 26 sent, 23 verified and
+#                        right, 1 disputed, 1 one_sided, no verified answer wrong
+#   computation_check_tier       a chat triage tier or an answer tier; it sees the question text
+#                                only, cut to triage_max_chars
+#                                Measured 2026-11-24 on the 62 labelled cases (36 golden, 26
+#                                hard), the check alone, one run each: local (qwen3 14b)
+#                                precision 0.952, recall 0.976, median 0.87 s, 2 questions sent
+#                                wrongly (both JavaScript snippets); triage (llama3.2:3b)
+#                                precision 0.809, recall 0.927, median 0.24 s, 9 sent wrongly,
+#                                4 of them lookups and 3 domain questions. So this is `local`
+#   computation_check_threshold  a yes below this confidence counts as no
+#   computation_cross_check      true (default): the execute run auto starts writes two programs
+#                                and compares them, whatever execute.cross_check says. false: one
+#                                program
 auto:
   closed_book_tier: mid
   stuffed_fill_ratio: 0.8
+  computation_check: true
+  computation_check_tier: local
+  computation_check_threshold: 0.8
+  computation_cross_check: true
 
 # Openbook mode (auto with sources that do not fit, or `--require-citations`): load the sources, pick passages, draft with citations,
 # check every quote in code, judge grounding, escalate at most once. Stuffed mode
@@ -274,7 +306,8 @@ openbook:
 # MicroVM; code compares the program's last output line with the claim when there is one
 # (execute.decide; a matching claim gives `claim_matched`, no claim gives `executed`).
 # With the cross-check a second program is written independently and only matching
-# outputs are `verified`. Auto mode never picks execute mode. The gate is src/inference_arbiter/sandbox.py: no host mount, deny-all network scoped to
+# outputs are `verified`. Auto mode picks execute mode only when auto.computation_check is on
+# and the check says yes. The gate is src/inference_arbiter/sandbox.py: no host mount, deny-all network scoped to
 # the one sandbox, an environment built from scratch, and the sandbox is always removed.
 #   tier               answer tier that writes the program; --tier overrides it
 #   think              Ollama only: `think` sent with the draft and repair calls (false | true |

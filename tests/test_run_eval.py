@@ -1219,3 +1219,111 @@ def test_scorecard_prints_the_disputed_table_for_a_cross_check_only(capsys):
         run_eval.build_scorecard([execute_record("A", "pass", "executed")]), case_count=1
     )
     assert "Disputed cross-checks" not in capsys.readouterr().out
+
+
+# ---- auto and auto:check strategies ----
+
+
+def test_parse_auto_strategies():
+    assert run_eval.parse_strategy("auto") == run_eval.Strategy("auto", "auto")
+    assert run_eval.parse_strategy("auto:check") == run_eval.Strategy("auto:check", "auto:check")
+    for kind in ("auto", "auto:check"):
+        assert kind in run_eval.SUITE_KINDS[run_eval.SUITE_CLOSEDBOOK]
+        assert kind not in run_eval.SUITE_KINDS[run_eval.SUITE_OPENBOOK]
+        assert run_eval.unsupported_reason(run_eval.parse_strategy(kind)) is None
+    for bad_text in ("auto:", "auto:mid", "autocheck"):
+        with pytest.raises(ValueError):
+            run_eval.parse_strategy(bad_text)
+
+
+def test_auto_strategies_request_auto_mode_with_the_check_forced_off_or_on():
+    plain = run_eval.build_request(run_eval.parse_strategy("auto"), "q", None)
+    checked = run_eval.build_request(run_eval.parse_strategy("auto:check"), "q", None)
+
+    assert (plain.mode, plain.tier, plain.computation_check) == ("auto", None, False)
+    assert (checked.mode, checked.tier, checked.computation_check) == ("auto", None, True)
+    assert plain.no_fallback is False
+
+
+def test_computation_check_fields_are_recorded_per_case():
+    class CheckingHarness:
+        def answer(self, request):
+            return fake_result(
+                "Verified by two programs: ...\n\nAnswer: 2", mode="execute", execution_status="verified",
+                auto_reason="auto: ... [check on triage: yes, confidence 0.90]", computation_verdict="yes",
+                computation_check_tier="triage", computation_check_confidence=0.9,
+                calls=[
+                    SimpleNamespace(role="check", tier="triage", latency_ms=240.0, cost_usd=0.0, error_message=None),
+                    SimpleNamespace(role="draft", tier="mid", latency_ms=9000.0, cost_usd=0.0, error_message=None),
+                ],
+            )
+
+    case = {**next(case for case in CASES if case["id"] == "CD-01"), "computable": True}
+    row = run_eval.run_case(CheckingHarness(), run_eval.parse_strategy("auto:check"), case, None)
+
+    assert row["outcome"] == "pass"
+    assert (row["computation_verdict"], row["computation_check_tier"], row["computation_check_confidence"]) == (
+        "yes", "triage", 0.9
+    )
+    assert row["computation_check_latency_ms"] == 240.0
+    assert row["expected_computable"] is True
+    assert row["auto_reason"].endswith("confidence 0.90]")
+
+
+def test_a_case_without_a_label_records_none():
+    assert run_eval.blank_record(run_eval.parse_strategy("auto"), CASES[0])["expected_computable"] is None
+
+
+def check_record(case_id, verdict, expected, category="reasoning", mode="route", latency_ms=200.0, outcome="pass"):
+    return record(
+        "auto:check", case_id, outcome, category=category, mode=mode, computation_verdict=verdict,
+        expected_computable=expected, computation_check_latency_ms=latency_ms,
+        execution_status="verified" if mode == "execute" else "skipped",
+    )
+
+
+def test_summarise_computation_check():
+    records = [
+        check_record("A", "yes", True, mode="execute", latency_ms=100.0),
+        check_record("B", "yes", True, mode="route", latency_ms=110.0),
+        check_record("C", "yes", False, category="lookup", mode="execute", latency_ms=120.0),
+        check_record("D", "no", True, latency_ms=300.0),
+        check_record("E", "no", False, category="lookup", latency_ms=200.0),
+        check_record("F", "low_confidence", True, latency_ms=250.0),
+        check_record("G", "failed", False, category="domain", latency_ms=5000.0),
+        check_record("H", "no", None, category="domain", latency_ms=None),
+        record("auto", "A", "pass", mode="route", computation_verdict="not_run", expected_computable=True),
+    ]
+
+    check = run_eval.summarise_strategy("auto:check", records)["computation_check"]
+
+    assert check["checked"] == 8
+    assert check["verdicts"] == {"yes": 3, "no": 3, "low_confidence": 1, "failed": 1}
+    assert check["sent_to_execute"] == 3
+    assert check["sent_to_execute_by_category"] == {"reasoning": 2, "lookup": 1}
+    assert check["execute_fallbacks"] == ["B"]
+    assert check["labelled"] == 7
+    assert (check["true_positive"], check["true_negative"]) == (2, 2)
+    assert check["false_positive_cases"] == ["C"]
+    assert check["false_negative_cases"] == ["D", "F"]
+    assert check["added_latency_p50_ms"] == 250.0
+    assert check["added_latency_p95_ms"] == 5000.0
+    assert run_eval.summarise_strategy("auto", records)["computation_check"] is None
+
+
+def test_scorecard_prints_the_computation_check_table_only_when_the_check_ran(capsys):
+    records = [
+        record("auto", "A", "pass", mode="route", computation_verdict="not_run"),
+        check_record("A", "yes", True, mode="execute"),
+        check_record("B", "no", False, category="lookup"),
+    ]
+
+    run_eval.print_scorecard(run_eval.build_scorecard(records), case_count=2)
+    printed = capsys.readouterr().out
+
+    assert "Computation check (auto:check" in printed
+    check_row = [line for line in printed.splitlines() if line.startswith("auto:check")][-2]
+    assert "reasoning 1" in check_row
+
+    run_eval.print_scorecard(run_eval.build_scorecard(records[:1]), case_count=1)
+    assert "Computation check (auto:check" not in capsys.readouterr().out

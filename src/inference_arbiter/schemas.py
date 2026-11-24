@@ -54,8 +54,15 @@ ExecutionStatus = Literal[
     "failed", "skipped",
 ]
 CallRole = Literal[
-    "triage", "answer", "draft", "verify", "repair", "embed", "ground", "escalate", "draft_b", "repair_b"
+    "triage", "answer", "draft", "verify", "repair", "embed", "ground", "escalate", "draft_b", "repair_b",
+    "check",
 ]
+# Auto mode's computation check (computation_check.py). not_run: the check was off, the
+# request had sources or the caller picked the mode or the tier. yes: the check said a short
+# program can compute the answer, at or above the confidence threshold. no: it said one
+# cannot. low_confidence: it said yes below the threshold. failed: the call timed out,
+# errored or returned invalid output. Only `yes` sends a question to execute mode.
+ComputationVerdict = Literal["not_run", "yes", "no", "low_confidence", "failed"]
 
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
@@ -81,7 +88,8 @@ class AskRequest(BaseModel):
     effort: Literal["low", "medium", "high"] | None = None
     simulate: Simulation | None = None
     # auto (default): the harness picks, see auto.decide_mode. No sources: one call to
-    # auto.closed_book_tier, no triage. Sources that fit the context window: stuffed.
+    # auto.closed_book_tier, no triage; with the computation check on, a question a short
+    # program can compute goes to execute mode. Sources that fit the context window: stuffed.
     # Sources that do not fit, or require_citations: openbook.
     # route: one triage call plus one answer call. chain: draft, schema gate, verify, repair.
     # openbook: load sources, retrieve passages, draft with citations, quote check,
@@ -108,6 +116,9 @@ class AskRequest(BaseModel):
     # execute only: the tier that writes program B. None: execute.cross_check_tier, else
     # the tier that writes program A. Setting it turns the cross-check on.
     cross_check_tier: str | None = None
+    # auto without sources and without a forced tier only: run the computation check
+    # before the closed-book call. None: use auto.computation_check from the config.
+    computation_check: bool | None = None
 
     @model_validator(mode="after")
     def _options_match_the_mode(self) -> "AskRequest":
@@ -129,6 +140,10 @@ class AskRequest(BaseModel):
             raise ValueError("cross_check and cross_check_tier need mode 'execute'")
         if self.cross_check is False and self.cross_check_tier is not None:
             raise ValueError("cross_check_tier cannot be set when cross_check is false")
+        if self.computation_check is not None and (
+            self.mode != "auto" or self.sources or self.tier is not None
+        ):
+            raise ValueError("computation_check needs mode 'auto' without sources and without a forced tier")
         if self.simulate in OPENBOOK_ONLY_SIMULATIONS and self.mode != "openbook":
             raise ValueError(f"simulate '{self.simulate}' needs mode 'openbook'")
         verifier_allowed = self.mode in ("chain", "openbook") or (self.mode == "auto" and self.sources)
@@ -147,6 +162,18 @@ class TriageDecision(BaseModel):
     label: RouteLabel
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str
+
+
+class ComputationCheckDecision(BaseModel):
+    """What the computation check tier must return."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Declared first for the same reason as DraftAnswer.working.
+    reason: str
+    # True when a short standard-library Python program can compute the answer.
+    computable: bool
+    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class DraftAnswer(BaseModel):
@@ -290,6 +317,12 @@ class TriageOutcome(BaseModel):
     call: CallResult | None = None
 
 
+class ComputationCheckOutcome(BaseModel):
+    status: TriageStatus
+    decision: ComputationCheckDecision | None = None
+    call: CallResult | None = None
+
+
 class CallSummary(BaseModel):
     """One model call as shown to the caller (mirrors the telemetry CallRecord)."""
 
@@ -362,8 +395,17 @@ class RunResult(BaseModel):
     escalation_tokens_estimated: int | None = None
     # Why auto mode picked `mode`; None when the caller picked the mode.
     auto_reason: str | None = None
+    # Auto mode's computation check: its verdict, the tier asked, and the confidence and
+    # reason it returned (None when it did not run or its output was not usable).
+    computation_verdict: ComputationVerdict = "not_run"
+    computation_check_tier: str | None = None
+    computation_check_confidence: float | None = None
+    computation_check_reason: str | None = None
     # Execute mode. "skipped" in every other mode. After a repair, `repaired` is true and
-    # these describe the repaired program.
+    # these describe the repaired program. One exception: when auto mode sent the question
+    # to execute mode and execution failed outright, the answer is one closed-book call;
+    # `mode` is then "route", this is "failed" and `execution_note` says the answer was not
+    # verified.
     execution_status: ExecutionStatus = "skipped"
     # The answer the model claimed, and the last line the program printed (None when no
     # program ran cleanly).

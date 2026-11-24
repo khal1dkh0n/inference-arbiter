@@ -20,6 +20,7 @@ Top level: `version` (int) and `cases` (list). Each case:
 | `expected_route` | string | `local`, `code`, `mid` or `frontier`. The route the owner expects the triage to pick. A hypothesis for measuring routing quality, not part of correctness. |
 | `difficulty` | string | `easy`, `medium`, `hard`. |
 | `notes` | string | Why the case is in the set and how it was verified. |
+| `computable` | bool, optional | Whether a short standard-library Python program can compute the answer from what the question gives. The label the computation check is scored against (see "Computation check labels"). Not read by the loader or the graders. |
 
 ## Match types and scoring
 
@@ -57,6 +58,10 @@ Rubric cases carry the most grader noise. Before trusting a Phase 2 scorecard, h
 | `tier:<name>` | Force one answer tier, route mode. |
 | `router` | Triage plus route, route mode. `--triage-tier` selects the triage tier. |
 | `chain` | Chain mode. `--verifier-tier` is passed through on the request. |
+| `execute:<tier>` | Execute mode, one program written by the tier. |
+| `crosscheck:<tier A>+<tier B>` | Execute mode with two independently written programs. |
+| `auto` | Auto mode with the computation check forced off: one call to `auto.closed_book_tier`, with its `on_error` hop. |
+| `auto:check` | Auto mode with the computation check forced on: a question the check says a program can compute goes to execute mode, the rest take the closed-book call. The scorecard adds a table of what the check did. |
 
 Options: `--strategies`, `--cases`, `--category`, `--judge-tier`, `--triage-tier`, `--verifier-tier`, `--max-cost-usd` (stops cleanly once cumulative reported cost, answers plus judge, passes it), `--out`, `--db`, `--merge` (include earlier result files in the scorecard and measured routes; this run wins on overlap; a file graded against a different golden set is skipped), `--regrade` (grade the stored answers of a result file again with the current grader, no model answer is re-run), `--routes-out`.
 
@@ -80,6 +85,19 @@ Ordering, cheapest first: `local` and `code` (strength 0, both on this machine a
 | `unresolved` | No tier answered correctly so far and at least one tier has no result. |
 
 `scripts/compare_triage.py --routes data/eval/measured_routes.json` scores triage against the measured routes as well as `expected_route` and reports both. Cases that are `none_correct` or `unresolved` are left unscored. A measured route rests on one answer per tier, so a tier that is right some of the time can flip a route between runs.
+
+## Computation check labels
+
+Every case of `eval/golden_questions.yaml` and `eval/hard_questions.yaml` carries `computable: true` or `false`. The labels were written on 2026-11-24, before the computation check was run on any case, by one rule: `true` when the answer is a value that follows from data and rules stated in the question, so that a short Python program using only the standard library can compute it; `false` when the answer has to be recalled or judged.
+
+| Set | `true` | `false` |
+| --- | --- | --- |
+| Golden (36) | 15: every reasoning case (RS-01 to RS-09) and the Python and SQL code cases (CD-01 to CD-04, CD-06, CD-08; `sqlite3` is in the standard library) | 21: every lookup, domain and trap case, and the two JavaScript code cases (CD-05, CD-07: a Python program cannot run them, it can only restate recalled JavaScript semantics) |
+| Hard (26) | 26: every case has a reference program under `eval/hard_reference/` | 0 |
+
+`scripts/check_computation.py` asks the check tier about every labelled case and reports the confusion counts, precision, recall, the misclassified ids and the median latency of the check call. No answer is written and nothing is executed. "Positive" means the check said yes at or above `auto.computation_check_threshold`, which is what sends a question to execute mode. `--tier` asks another tier. The result file keeps one record per case and the prompt text used.
+
+Adding the label changed both files' sha256, so `--merge` and `--regrade` refuse result files written before 2026-11-24 for these two sets ("graded against a different golden set"). No question, answer or scoring rule changed, which is why `version` was not bumped.
 
 ## Category breakdown
 
@@ -106,7 +124,7 @@ By route: local 9 (6 lookup, 3 trap), code 8, mid 17, frontier 2. By difficulty:
 
 ## Validation
 
-The file must parse as YAML, have 36 cases (or the current agreed count), unique ids, and every case must carry all eight fields. `match` must have `type`, plus `value` and `tolerance` for `numeric`, `criteria` and `pass_rule` for `rubric`, and `all_of` and/or `any_of` for `contains`.
+The file must parse as YAML, have 36 cases (or the current agreed count), unique ids, and every case must carry all eight required fields. `match` must have `type`, plus `value` and `tolerance` for `numeric`, `criteria` and `pass_rule` for `rubric`, and `all_of` and/or `any_of` for `contains`.
 
 ## Hard set (draft)
 

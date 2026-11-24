@@ -153,6 +153,17 @@ class AutoConfig(BaseModel):
     # Sources are stuffed into one call when the estimated prompt is at or under this
     # share of the answering tier's context_window_tokens.
     stuffed_fill_ratio: float = Field(default=0.8, gt=0, le=1)
+    # Before the closed-book call, ask one tier whether a short program can compute the
+    # answer; a yes sends the question to execute mode. Off until measured.
+    # --computation-check / --no-computation-check.
+    computation_check: bool = False
+    # The tier asked: a chat triage tier or an answer tier. It gets the question text only.
+    computation_check_tier: str = TRIAGE_TIER
+    # A yes below this confidence counts as no.
+    computation_check_threshold: float = Field(default=0.8, ge=0, le=1)
+    # When the check says yes, execute mode writes two programs and compares them
+    # (the cross-check), whatever execute.cross_check says. False: one program.
+    computation_cross_check: bool = True
 
 
 class ExecuteConfig(BaseModel):
@@ -303,6 +314,17 @@ class HarnessConfig(BaseModel):
             )
         if self.auto.closed_book_tier is not None and self.auto.closed_book_tier not in answer_tiers:
             raise ValueError(f"auto.closed_book_tier '{self.auto.closed_book_tier}' is not an answer tier")
+        check_tier = self.auto.computation_check_tier
+        if check_tier not in triage_tiers and check_tier not in answer_tiers:
+            raise ValueError(
+                f"auto.computation_check_tier '{check_tier}' is not a triage tier or an answer tier"
+            )
+        if self.providers[self.tiers[check_tier].provider].kind == "openrouter_decisions":
+            raise ValueError(
+                f"auto.computation_check_tier '{check_tier}' uses a decisions provider; it needs a chat model"
+            )
+        if self.auto.computation_check and self.execute is None:
+            raise ValueError("auto.computation_check needs an `execute:` block in the config")
         return self
 
     def auto_closed_book_tier(self) -> str:

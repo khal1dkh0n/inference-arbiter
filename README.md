@@ -39,6 +39,7 @@ Without a mode flag the harness chooses (auto mode). The rule is one pure functi
 | Case | What runs | Calls |
 | --- | --- | --- |
 | No sources | One call to `auto.closed_book_tier` (`mid`). No triage, no chain; the `on_error` fallback hop still applies | 1 |
+| No sources, the computation check is on and says yes | Execute mode on `execute.tier` with the two-program cross-check (see "Computation check" below). On in the shipped config | 1 check + 2 to 4 |
 | `--sources`, and the estimated prompt fits `auto.stuffed_fill_ratio` (0.8) of the answering tier's `context_window_tokens` | Stuffed: one call with the full text of every source ahead of the question. No citations | 1 |
 | `--sources` that do not fit, or a tier without `context_window_tokens` | The open-book pipeline: retrieval, draft with citations, quote check, grounding verifier, capped escalation | up to 5 |
 | `--sources` with `--require-citations` | The open-book pipeline whatever the size, for when the answer must be auditable | up to 5 |
@@ -46,6 +47,48 @@ Without a mode flag the harness chooses (auto mode). The rule is one pure functi
 The trace shows the choice and why, for example `mode stuffed (auto: sources fit, 10k of
 839k tokens)`, and the run row stores both (`mode`, `auto_reason`). Sources are loaded
 once and reused by the chosen mode. Token counts are estimates (characters / 4).
+
+### Computation check
+
+On in the shipped config; `--no-computation-check` turns it off for one call and
+`auto.computation_check: false` for every call (`--computation-check` turns it on for
+one). With it on, an auto request without sources and without `--tier` first makes one
+call to `auto.computation_check_tier` (the `local` tier in the shipped config) with
+a typed yes/no question and a confidence: can a short standard-library Python program
+compute the answer? The model judges, code decides (`computation_check.decide`, then
+`auto.decide_mode`):
+
+| Check result | What runs |
+| --- | --- |
+| yes, confidence at or above `auto.computation_check_threshold` (0.8) | Execute mode on `execute.tier`, with the cross-check when `auto.computation_cross_check` is true (the default), whatever `execute.cross_check` says |
+| no | The closed-book call, as without the check |
+| yes below the threshold (`low_confidence`) | The closed-book call |
+| timeout, client error or output that fails the schema (`failed`) | The closed-book call |
+
+The check is never run for a request with sources or with an explicit `--route`, `--chain`,
+`--stuffed`, `--execute` or `--tier`. Its call is in the trace and in telemetry with the
+role `check`, and the verdict is part of `auto_reason`, for example `auto: no sources, the
+computation check said no, one closed-book call [check on local: no, confidence 0.90]`.
+
+When auto has sent a question to execute mode, `verified`, `disputed` and `one_sided` are
+returned exactly as `--cross-check` returns them. When nothing could be executed (the
+drafts failed, `sbx` is missing, the sandbox is unavailable, both programs failed after
+their repairs), the harness makes the closed-book call it would have made without the
+check and returns that answer under a first line that starts `NOT VERIFIED:`. The run then
+reports `mode: route`, `execution_status: failed`, the reason in `auto_reason` and
+`execution_note`, and keeps the failed calls and sandbox rows in telemetry.
+
+Measured 2026-11-24, free tiers, one run per case (`eval/results/2026-11-24-auto-execute.md`).
+The check alone on 62 labelled cases: `local` (qwen3 14b) precision 0.952, recall 0.976,
+median 0.87 s; `triage` (llama3.2:3b) precision 0.809, recall 0.927, median 0.24 s, with
+lookups and domain questions among its wrong sends, which is why the shipped tier is
+`local`. End to end with the check on `local`: the golden set scored 35/36 with and
+without the check (17 questions sent to execution, all `verified` and right, none of them
+a lookup, domain or trap case; 0.78 s median added to the other 19); the hard set had 25
+of 26 sent, 23 `verified` and right, 1 `disputed`, 1 `one_sided` and right, 1 answered
+closed-book and right, and no `verified` answer wrong. A question sent to execution took
+11.3 s at the median on the golden set against 3.1 s for the plain call. The check stays
+off until the owner turns it on.
 
 Why these defaults: on the Phase 2 suites a single `mid` call was more accurate than the
 chain at no cost, a stuffed call tied the pipeline whenever the sources fit, and the
@@ -57,7 +100,8 @@ Explicit flags win over auto:
 | --- | --- |
 | `--route` | Route mode: a triage call picks the tier by the routing rules below, then one answer call. `--triage-tier` and `--simulate triage-timeout` imply it |
 | `--chain` | Chain mode: triage, draft, schema gate, verify, at most one repair |
-| `--execute` | Execute mode: `execute.tier` writes a Python program and, optionally, the answer it claims, the program runs in a throwaway sandbox, and the answer says what execution did and did not confirm. Needs the `sbx` CLI. Not combinable with `--chain`, `--route`, `--stuffed`, `--sources`, `--triage-tier` or `--verifier-tier`; `--tier` picks the tier that writes the program. Auto mode never picks it |
+| `--execute` | Execute mode: `execute.tier` writes a Python program and, optionally, the answer it claims, the program runs in a throwaway sandbox, and the answer says what execution did and did not confirm. Needs the `sbx` CLI. Not combinable with `--chain`, `--route`, `--stuffed`, `--sources`, `--triage-tier` or `--verifier-tier`; `--tier` picks the tier that writes the program. Auto mode picks it only when the computation check is on and says yes |
+| `--computation-check` / `--no-computation-check` | Auto mode without sources: run, or do not run, the computation check before the closed-book call, whatever `auto.computation_check` says. A usage error with `--route`, `--chain`, `--stuffed`, `--execute`, `--cross-check`, `--sources` or `--tier` |
 | `--cross-check` | Execute mode with a second program: written independently from the question alone, run in its own sandbox, and compared with the first in code. `verified` only when both outputs match; `disputed` when they differ; `one_sided` when only one ran. Implies `--execute`. Off unless this flag or `execute.cross_check` turns it on |
 | `--cross-check-tier NAME` | The tier that writes the second program (implies `--cross-check`). Default `execute.cross_check_tier`, else the tier that writes the first |
 | `--tier NAME` | Answer with this tier, no triage (`local`, `code`, `local_heavy`, `mid`, `frontier`). Alone it is one forced call; with `--chain` it forces the draft tier; with `--sources` it is the stuffed or drafting tier, and its context window is the one checked |
@@ -687,7 +731,9 @@ version 7 adds `sandbox_runs` and, on `runs`, `execution_status`,
 `claimed_answer` and `executed_answer`; version 4 adds each call's finish reason and reasoning tokens, and
 grounding notes on the run; version 5 adds what an escalation was sent:
 `escalation_passages` and `escalation_tokens_estimated`; version 6 adds `auto_reason`, why
-auto mode picked the run's `mode`, null when the caller picked it); an older database is migrated in place the first time the
+auto mode picked the run's `mode`, null when the caller picked it; when the computation check ran, its
+tier, verdict and confidence are part of this text and its call is a `calls` row with role `check`, so
+the check needed no new column); an older database is migrated in place the first time the
 harness opens it (columns are added with defaults, old rows stay readable).
 
 ## Configuration
@@ -702,10 +748,11 @@ output. The sha256 of the config file is stored with every run.
 | Path | Role |
 | --- | --- |
 | `src/inference_arbiter/config.py` | YAML loading, pydantic validation, `.env` loader, config hash |
-| `src/inference_arbiter/schemas.py` | `AskRequest`, `TriageDecision`, `DraftAnswer`, `VerifierVerdict`, `OpenbookDraft`, `Citation`, `CallResult`, `RunResult` |
+| `src/inference_arbiter/schemas.py` | `AskRequest`, `TriageDecision`, `ComputationCheckDecision`, `DraftAnswer`, `VerifierVerdict`, `OpenbookDraft`, `Citation`, `CallResult`, `RunResult` |
 | `src/inference_arbiter/clients.py` | `OllamaNativeClient` (native `/api/chat` and `/api/embed`), `OpenRouterClient` (`openai` SDK), `OpenRouterDecisionsClient` |
 | `src/inference_arbiter/triage.py` | Text-only triage call and output validation |
 | `src/inference_arbiter/auto.py` | Auto mode's decision table: which strategy answers when the caller did not pick one |
+| `src/inference_arbiter/computation_check.py` | Auto mode's computation check: the prompt, the typed call and the verdict table |
 | `src/inference_arbiter/router.py` | Routing rules, auto-mode resolution, single fallback hop, telemetry hand-off; `Harness.answer(request)` is the entry point for every mode |
 | `src/inference_arbiter/chain.py` | Chain control flow, schema gate, draft and repair prompts |
 | `src/inference_arbiter/verifier.py` | Chat verifier prompt, Jev questions, thresholds and truth table |
@@ -719,6 +766,7 @@ output. The sha256 of the config file is stored with every run.
 | `src/inference_arbiter/cli.py` | `ask` command |
 | `eval/` | Golden questions for Phase 2, the open-book set (`eval/openbook/`) and recorded scorecards (`eval/results/`) |
 | `scripts/run_eval.py` | Eval runner and scorecard for both suites |
+| `scripts/check_computation.py` | Scores the computation check alone against the `computable` labels of the question files |
 | `scripts/fetch_corpus.py` | Fetches and verifies the open-book corpus against `eval/openbook/corpus.yaml` |
 
 ## Known limits
@@ -760,8 +808,9 @@ output. The sha256 of the config file is stored with every run.
   does. Those answers are `executed`, not `verified`: one program, run once, checked
   against nothing. A wrong program gives a wrong `executed` answer with no warning.
 - Execute mode will "verify" a question that needs no computation: the model writes
-  `print("Canberra")` and claims `Canberra`. Auto mode never picks execute, and whether it
-  should for some class of question is not decided.
+  `print("Canberra")` and claims `Canberra`. Auto mode reaches execute only through the
+  computation check, which is on in the shipped config; a false yes from the check sends
+  such a question there.
 - A program that prints a different but equivalent form of the claim (`1/3` against
   `0.3333`, two sentences with different wording) counts as a disagreement and the
   executed output is returned as `corrected`.

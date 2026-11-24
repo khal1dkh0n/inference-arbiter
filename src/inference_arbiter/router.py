@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from inference_arbiter import auto, chain, execute, openbook, sandbox
+from inference_arbiter import auto, chain, computation_check, execute, openbook, sandbox
 from inference_arbiter.clients import ERROR_TIMEOUT, ChatCall, ChatClient, build_clients
 from inference_arbiter.config import (
     DEFAULT_CONFIG_PATH,
@@ -40,6 +40,8 @@ from inference_arbiter.schemas import (
     CallResult,
     CallSummary,
     Citation,
+    ComputationCheckOutcome,
+    ComputationVerdict,
     ExecutionStatus,
     GroundingStatus,
     Message,
@@ -62,6 +64,12 @@ SKIP_FALLBACK_NOT_REQUESTED = "no_fallback_requested"
 
 ROLE_TRIAGE = "triage"
 ROLE_ANSWER = "answer"
+ROLE_CHECK = "check"
+
+NOT_VERIFIED_NOTE = (
+    "NOT VERIFIED: a program was meant to compute this answer, but execution failed ({why}). "
+    "The answer below is one closed-book call and nothing was executed to check it."
+)
 
 
 class UnknownTierError(ValueError):
@@ -456,19 +464,39 @@ class Harness:
 
         return call_tier
 
+    def _computation_check(self, request: AskRequest) -> ComputationCheckOutcome:
+        """Run the computation check when this auto request without sources asks for one.
+
+        A forced tier is an explicit choice and never runs the check.
+        """
+        config = self._config
+        enabled = config.auto.computation_check
+        if request.computation_check is not None:
+            enabled = request.computation_check
+        if not enabled or request.tier is not None:
+            return ComputationCheckOutcome(status="skipped")
+        if config.execute is None:
+            raise ExecuteNotConfiguredError("the computation check needs an `execute:` block in the config")
+        check_client = self._clients[config.tiers[config.auto.computation_check_tier].provider]
+        return computation_check.run_computation_check(config, check_client, request.messages)
+
     def _resolve_auto(
         self, request: AskRequest
-    ) -> tuple[auto.AutoDecision, openbook.PreloadedSources | None]:
+    ) -> tuple[auto.AutoDecision, openbook.PreloadedSources | None, ComputationCheckOutcome]:
         """Pick the mode for an auto request. Sources are loaded here, once, and reused."""
         config = self._config
         if not request.sources:
-            return auto.decide_mode(False, 0, None, config.auto.stuffed_fill_ratio, False), None
+            check = self._computation_check(request)
+            verdict = computation_check.verdict_of(check, config.auto.computation_check_threshold)
+            decision = auto.decide_mode(False, 0, None, config.auto.stuffed_fill_ratio, False, verdict)
+            return decision, None, check
+        not_run = ComputationCheckOutcome(status="skipped")
         if config.openbook is None:
             raise OpenbookNotConfiguredError("sources need an `openbook:` block in the config")
         preloaded = openbook.preload_sources(config.openbook, request.sources, self._source_transport)
         if preloaded.error is not None:
             # The pipeline reports the load failure; no model is called.
-            return auto.AutoDecision("openbook", auto.REASON_LOAD_FAILED), preloaded
+            return auto.AutoDecision("openbook", auto.REASON_LOAD_FAILED), preloaded, not_run
         answering_tier = request.tier or config.auto_closed_book_tier()
         decision = auto.decide_mode(
             True,
@@ -477,7 +505,29 @@ class Harness:
             config.auto.stuffed_fill_ratio,
             request.require_citations,
         )
-        return decision, preloaded
+        return decision, preloaded, not_run
+
+    def _fall_back_to_closed_book(
+        self, request: AskRequest, failed: _RunOutcome, answer_messages: list[dict[str, str]]
+    ) -> _RunOutcome:
+        """Auto sent the question to execute mode and nothing could be executed: answer with
+        the closed-book call auto would have made, and say the answer was not verified.
+
+        The failed run's calls and sandbox audit rows are kept in front of the closed-book call.
+        """
+        outcome = self._answer_route(request, self._config.auto_closed_book_tier(), answer_messages)
+        note = NOT_VERIFIED_NOTE.format(why=failed.error_type or "no answer")
+        if outcome.answer is not None:
+            outcome.answer = f"{note}\n\n{outcome.answer}"
+        outcome.execution_status = "failed"
+        outcome.execution_note = f"{note} {failed.execution_note or ''}".strip()
+        outcome.repair_error_type = failed.repair_error_type
+        outcome.cross_check = failed.cross_check
+        outcome.cross_check_tier = failed.cross_check_tier
+        outcome.sandbox_records = failed.sandbox_records
+        outcome.call_records = failed.call_records + outcome.call_records
+        outcome.call_messages = failed.call_messages + outcome.call_messages
+        return outcome
 
     def _answer_openbook(
         self,
@@ -697,10 +747,27 @@ class Harness:
         # request carries the mode that runs.
         auto_reason: str | None = None
         preloaded: openbook.PreloadedSources | None = None
+        check = ComputationCheckOutcome(status="skipped")
+        auto_picked_execute = False
         if request.mode == "auto":
-            auto_decision, preloaded = self._resolve_auto(request)
+            auto_decision, preloaded, check = self._resolve_auto(request)
             auto_reason = auto_decision.reason
-            request = request.model_copy(update={"mode": auto_decision.mode})
+            mode_update: dict[str, Any] = {"mode": auto_decision.mode, "computation_check": None}
+            if auto_decision.mode == "execute":
+                auto_picked_execute = True
+                mode_update["cross_check"] = config.auto.computation_cross_check
+            request = request.model_copy(update=mode_update)
+        computation_verdict: ComputationVerdict = computation_check.verdict_of(
+            check, config.auto.computation_check_threshold
+        )
+        check_note = ""
+        if computation_verdict != "not_run":
+            check_note = " [" + auto.describe_check(
+                config.auto.computation_check_tier,
+                computation_verdict,
+                check.decision.confidence if check.decision else None,
+            ) + "]"
+            auto_reason = f"{auto_reason}{check_note}"
 
         verifier_tier_name: str | None = None
         grounding_verifier_name: str | None = None
@@ -722,6 +789,13 @@ class Harness:
 
         call_records: list[CallRecord] = []
         call_messages: list[str | None] = []
+        if check.call is not None:
+            call_records.append(
+                self._make_call_record(
+                    0, ROLE_CHECK, config.auto.computation_check_tier, None, check.call, check.status
+                )
+            )
+            call_messages.append(check.call.error_message)
 
         if request.mode in ("openbook", "execute") or auto_reason is not None:
             # The tier is config-selected: openbook, execute and auto make no triage call.
@@ -754,6 +828,14 @@ class Harness:
             outcome = self._answer_execute(request, selected_tier, answer_messages)
         else:
             outcome = self._answer_route(request, selected_tier, answer_messages)
+
+        # Execute mode ends in an error only when it has nothing to return: no program ran
+        # and there is no claim (execution_status failed), or the one draft call failed.
+        if auto_picked_execute and outcome.status != STATUS_OK:
+            auto_reason = auto.execute_fallback_reason(outcome.error_type) + check_note
+            request = request.model_copy(update={"mode": "route", "cross_check": None})
+            outcome = self._fall_back_to_closed_book(request, outcome, answer_messages)
+            selected_tier, route_reason = config.auto_closed_book_tier(), "auto"
 
         call_records.extend(outcome.call_records)
         call_messages.extend(outcome.call_messages)
@@ -875,6 +957,12 @@ class Harness:
             escalation_passages=outcome.escalation_passages,
             escalation_tokens_estimated=outcome.escalation_tokens_estimated,
             auto_reason=auto_reason,
+            computation_verdict=computation_verdict,
+            computation_check_tier=(
+                config.auto.computation_check_tier if computation_verdict != "not_run" else None
+            ),
+            computation_check_confidence=check.decision.confidence if check.decision else None,
+            computation_check_reason=check.decision.reason if check.decision else None,
             execution_status=outcome.execution_status,
             claimed_answer=outcome.claimed_answer,
             executed_answer=outcome.executed_answer,

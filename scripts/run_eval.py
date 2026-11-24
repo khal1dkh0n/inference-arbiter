@@ -10,6 +10,9 @@ Closed-book suite (default, eval/golden_questions.yaml):
                   tier is flagged and excluded from that tier's accuracy.
     router        triage plus route (route mode); --triage-tier selects the triage tier.
     chain         chain mode; --verifier-tier is passed through when the harness accepts it.
+    auto          auto mode with the computation check off: one call to auto.closed_book_tier.
+    auto:check    auto mode with the computation check on: a question the check says a program
+                  can compute goes to execute mode, the rest take the closed-book call.
 
 Open-book suite (--suite openbook, eval/openbook/questions.yaml over eval/openbook/corpus.yaml):
     openbook        the grounded pipeline (mode openbook) over the case's source documents.
@@ -89,7 +92,15 @@ KIND_EXECUTE = "execute"
 # the first tier and B by the second; only matching outputs are `verified`.
 # crosscheck:<tier> runs both on one tier (B is then asked for a different method).
 KIND_CROSSCHECK = "crosscheck"
+# auto: auto mode with the computation check forced off.
+# auto:check: the same with the check forced on, whatever auto.computation_check says.
+KIND_AUTO = "auto"
+KIND_AUTO_CHECK = "auto:check"
 MODE_EXECUTE = "execute"
+VERDICT_NOT_RUN = "not_run"
+VERDICT_YES = "yes"
+COMPUTATION_VERDICTS = ("yes", "no", "low_confidence", "failed")
+ROLE_CHECK = "check"
 EXECUTION_STATUSES = (
     "verified", "disputed", "one_sided", "claim_matched", "corrected", "executed", "unverified", "failed"
 )
@@ -97,7 +108,9 @@ STATUS_DISPUTED = "disputed"
 # Match types a single program's output can be graded on without a judge call.
 PER_PROGRAM_MATCH_TYPES = ("numeric", "exact", "contains")
 SUITE_KINDS = {
-    SUITE_CLOSEDBOOK: (KIND_TIER, KIND_ROUTER, KIND_CHAIN, KIND_EXECUTE, KIND_CROSSCHECK),
+    SUITE_CLOSEDBOOK: (
+        KIND_TIER, KIND_ROUTER, KIND_CHAIN, KIND_EXECUTE, KIND_CROSSCHECK, KIND_AUTO, KIND_AUTO_CHECK,
+    ),
     SUITE_OPENBOOK: (KIND_OPENBOOK, KIND_STUFFED, KIND_CLOSED),
 }
 SUITE_DEFAULT_STRATEGIES = {
@@ -172,6 +185,8 @@ def parse_strategy(text: str) -> Strategy:
         return Strategy(name=text, kind=KIND_CHAIN)
     if text == KIND_OPENBOOK:
         return Strategy(name=text, kind=KIND_OPENBOOK)
+    if text in (KIND_AUTO, KIND_AUTO_CHECK):
+        return Strategy(name=text, kind=text)
     crosscheck_prefix = f"{KIND_CROSSCHECK}:"
     if text.startswith(crosscheck_prefix):
         tier_a, _, tier_b = text[len(crosscheck_prefix):].partition("+")
@@ -183,8 +198,8 @@ def parse_strategy(text: str) -> Strategy:
         if text.startswith(prefix) and len(text) > len(prefix):
             return Strategy(name=text, kind=kind, tier=text.split(":", 1)[1])
     raise ValueError(
-        f"unknown strategy '{text}'; use tier:<name>, router, chain, execute:<tier> or "
-        "crosscheck:<tier A>+<tier B> (closed-book suite) or "
+        f"unknown strategy '{text}'; use tier:<name>, router, chain, execute:<tier>, "
+        "crosscheck:<tier A>+<tier B>, auto or auto:check (closed-book suite) or "
         "openbook, stuffed:<tier> or closed:<tier> (open-book suite)"
     )
 
@@ -299,6 +314,8 @@ def unsupported_reason(strategy: Strategy) -> str | None:
         return "AskRequest does not accept mode 'execute' yet; execute mode is not available in this checkout"
     if strategy.kind == KIND_CROSSCHECK and "cross_check_tier" not in AskRequest.model_fields:
         return "AskRequest has no 'cross_check_tier' field yet; the cross-check is not available in this checkout"
+    if strategy.kind in (KIND_AUTO, KIND_AUTO_CHECK) and "computation_check" not in AskRequest.model_fields:
+        return "AskRequest has no 'computation_check' field yet; the computation check is not available in this checkout"
     if strategy.kind == KIND_OPENBOOK and not harness_mode_supported(MODE_OPENBOOK):
         return (
             "AskRequest does not accept mode 'openbook' with sources yet; the grounded pipeline "
@@ -358,6 +375,8 @@ def build_request(strategy: Strategy, question: str, verifier_tier: str | None) 
             overrides["cross_check"] = False
     elif strategy.kind == KIND_CROSSCHECK:
         overrides.update(mode=MODE_EXECUTE, cross_check=True, cross_check_tier=strategy.cross_check_tier)
+    elif strategy.kind in (KIND_AUTO, KIND_AUTO_CHECK):
+        overrides.update(mode="auto", computation_check=strategy.kind == KIND_AUTO_CHECK)
     elif chain_mode_supported():
         overrides["mode"] = "chain" if strategy.kind == KIND_CHAIN else "route"
     if (
@@ -470,6 +489,15 @@ def blank_record(strategy: Strategy, case: dict[str, Any]) -> dict[str, Any]:
         "cross_check_rule": None,
         "program_a_grade": None,
         "program_b_grade": None,
+        # auto strategies only: why auto picked the mode, the computation check's verdict
+        # (yes | no | low_confidence | failed | not_run), its confidence and the latency of
+        # its call, and the case's own `computable` label when the question file has one.
+        "auto_reason": None,
+        "computation_verdict": None,
+        "computation_check_tier": None,
+        "computation_check_confidence": None,
+        "computation_check_latency_ms": None,
+        "expected_computable": case.get("computable"),
         "failed_call_messages": [],
         "escalation_attempted": None,
         "escalation_cost_usd": None,
@@ -490,9 +518,21 @@ def escalation_calls(calls: list[Any]) -> list[Any]:
     return [call for call in calls if getattr(call, "role", None) in ESCALATION_CALL_ROLES]
 
 
+def check_call_latency_ms(calls: list[Any]) -> float | None:
+    for call in calls:
+        if getattr(call, "role", None) == ROLE_CHECK:
+            return call.latency_ms
+    return None
+
+
 def copy_result_fields(record: dict[str, Any], result: Any) -> None:
     stronger_tier_calls = escalation_calls(getattr(result, "calls", []))
     record.update(
+        auto_reason=getattr(result, "auto_reason", None),
+        computation_verdict=getattr(result, "computation_verdict", None),
+        computation_check_tier=getattr(result, "computation_check_tier", None),
+        computation_check_confidence=getattr(result, "computation_check_confidence", None),
+        computation_check_latency_ms=check_call_latency_ms(getattr(result, "calls", None) or []),
         escalation_attempted=bool(stronger_tier_calls),
         escalation_cost_usd=sum(getattr(call, "cost_usd", None) or 0.0 for call in stronger_tier_calls),
         answer=result.answer,
@@ -933,6 +973,60 @@ def summarise_execution(own_records: list[dict[str, Any]]) -> dict[str, Any] | N
     return execution
 
 
+def summarise_computation_check(own_records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """What the computation check did over a strategy's runs. None when it never ran.
+
+    `sent_to_execute` counts the runs the check answered yes for, by category. The confusion
+    counts compare that with each case's `computable` label and cover labelled cases only.
+    `execute_fallbacks` are the yes runs where nothing could be executed and the answer is
+    the closed-book call. `added_latency` is the check call's own latency on the runs that
+    were not sent to execute mode: what the check cost a question it did not help.
+    """
+    checked = [record for record in own_records if record.get("computation_verdict") in COMPUTATION_VERDICTS]
+    if not checked:
+        return None
+    sent = [record for record in checked if record["computation_verdict"] == VERDICT_YES]
+    sent_by_category: dict[str, int] = {}
+    for record in sent:
+        sent_by_category[record["category"]] = sent_by_category.get(record["category"], 0) + 1
+    labelled = [record for record in checked if record.get("expected_computable") is not None]
+
+    def cases_where(expected: bool, said_yes: bool) -> list[str]:
+        return [
+            record["case_id"]
+            for record in labelled
+            if bool(record["expected_computable"]) is expected
+            and (record["computation_verdict"] == VERDICT_YES) is said_yes
+        ]
+
+    not_sent_latencies = [
+        record["computation_check_latency_ms"]
+        for record in checked
+        if record["computation_verdict"] != VERDICT_YES and record.get("computation_check_latency_ms") is not None
+    ]
+    return {
+        "checked": len(checked),
+        "verdicts": {
+            verdict: sum(1 for record in checked if record["computation_verdict"] == verdict)
+            for verdict in COMPUTATION_VERDICTS
+        },
+        "sent_to_execute": len(sent),
+        "sent_to_execute_by_category": sent_by_category,
+        "execute_fallbacks": [
+            record["case_id"]
+            for record in sent
+            if record.get("mode") != MODE_EXECUTE
+        ],
+        "labelled": len(labelled),
+        "true_positive": len(cases_where(True, True)),
+        "false_positive_cases": cases_where(False, True),
+        "false_negative_cases": cases_where(True, False),
+        "true_negative": len(cases_where(False, False)),
+        "added_latency_p50_ms": percentile(not_sent_latencies, 50),
+        "added_latency_p95_ms": percentile(not_sent_latencies, 95),
+    }
+
+
 def summarise_strategy(strategy_name: str, records: list[dict[str, Any]]) -> dict[str, Any]:
     own_records = [record for record in records if record["strategy"] == strategy_name]
     counts = {
@@ -988,6 +1082,7 @@ def summarise_strategy(strategy_name: str, records: list[dict[str, Any]]) -> dic
         ),
         **summarise_escalations(own_records),
         "execution": summarise_execution(own_records),
+        "computation_check": summarise_computation_check(own_records),
         "by_category": by_category,
     }
 
@@ -1386,7 +1481,8 @@ def print_execution(summaries: list[dict[str, Any]]) -> None:
         "that wrote it. corrected: it disagreed and the executed output was returned. executed: it "
         "ran cleanly and the model gave no claim to compare. unverified: nothing ran cleanly, the "
         "model's claim was returned. failed: nothing ran cleanly and there was nothing to return, "
-        "the run is an error)\n"
+        "the run is an error; under auto:check it is then answered by the closed-book call and "
+        "graded as that answer)\n"
     )
     rows = []
     for summary in executing:
@@ -1418,6 +1514,46 @@ def print_execution(summaries: list[dict[str, Any]]) -> None:
                 for summary in cross_checking
             ],
         )
+
+
+def print_computation_check(summaries: list[dict[str, Any]]) -> None:
+    checking = [summary for summary in summaries if summary.get("computation_check")]
+    if not checking:
+        return
+    print(
+        "\nComputation check (auto:check; sent = the check said yes and the question went to execute "
+        "mode. TP, FP, FN, TN compare that with the case's `computable` label. fell back = sent, "
+        "nothing could be executed, answered by the closed-book call as not verified. added "
+        "latency = the check call on the runs it did not send to execute mode)\n"
+    )
+    rows = []
+    for summary in checking:
+        check = summary["computation_check"]
+        by_category = ", ".join(
+            f"{category} {count}" for category, count in sorted(check["sent_to_execute_by_category"].items())
+        )
+        rows.append(
+            [
+                summary["strategy"],
+                check["checked"],
+                check["sent_to_execute"],
+                by_category or "-",
+                check["true_positive"],
+                ",".join(check["false_positive_cases"]) or "-",
+                ",".join(check["false_negative_cases"]) or "-",
+                check["true_negative"],
+                check["verdicts"]["low_confidence"],
+                check["verdicts"]["failed"],
+                ",".join(check["execute_fallbacks"]) or "-",
+                _milliseconds(check["added_latency_p50_ms"]),
+                _milliseconds(check["added_latency_p95_ms"]),
+            ]
+        )
+    print_table(
+        ["strategy", "checked", "sent", "sent by category", "TP", "FP cases", "FN cases", "TN",
+         "low confidence", "check failed", "fell back", "added p50 ms", "added p95 ms"],
+        rows,
+    )
 
 
 def print_scorecard(scorecard: dict[str, Any], case_count: int) -> None:
@@ -1456,6 +1592,7 @@ def print_scorecard(scorecard: dict[str, Any], case_count: int) -> None:
     )
     print_escalation_costs(summaries)
     print_execution(summaries)
+    print_computation_check(summaries)
 
     categories: list[str] = []
     for summary in summaries:
@@ -1702,7 +1839,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--suite", choices=[SUITE_CLOSEDBOOK, SUITE_OPENBOOK], default=SUITE_CLOSEDBOOK,
                         help="closedbook: the golden set (default). openbook: questions over supplied sources")
     parser.add_argument("--strategies", nargs="+",
-                        help="closedbook: tier:<name>, router, chain, execute:<tier>, crosscheck:<tier A>+<tier B> (default: tier:local tier:mid router). "
+                        help="closedbook: tier:<name>, router, chain, execute:<tier>, crosscheck:<tier A>+<tier B>, auto, auto:check (default: tier:local tier:mid router). "
                         "openbook: openbook, stuffed:<tier>, closed:<tier> (default: closed:mid stuffed:mid openbook)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--golden", help="question file (default: eval/golden_questions.yaml, or "

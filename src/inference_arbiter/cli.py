@@ -33,8 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Without a mode flag the harness picks the strategy (auto): no sources, one call to "
             "auto.closed_book_tier; sources that fit the context window, one stuffed call; sources "
-            "that do not fit, the grounded pipeline with citations. --route, --chain, --stuffed, "
-            "--require-citations and --execute pick explicitly."
+            "that do not fit, the grounded pipeline with citations. With the computation check on, "
+            "a question without sources that a short program can compute goes to execute mode. "
+            "--route, --chain, --stuffed, --require-citations and --execute pick explicitly."
         ),
     )
     ask.add_argument("question", help="the question text")
@@ -80,6 +81,21 @@ def build_parser() -> argparse.ArgumentParser:
             "the tier that writes the second program (implies --cross-check); default "
             "execute.cross_check_tier, else the tier that writes the first"
         ),
+    )
+    ask.add_argument(
+        "--computation-check",
+        action="store_true",
+        help=(
+            "auto mode without sources: first ask auto.computation_check_tier whether a short program "
+            "can compute the answer; on a confident yes the question goes to execute mode (with the "
+            "cross-check when auto.computation_cross_check is true), otherwise one closed-book call "
+            "as usual. Default: config auto.computation_check"
+        ),
+    )
+    ask.add_argument(
+        "--no-computation-check",
+        action="store_true",
+        help="auto mode without sources: do not run the computation check, whatever the config says",
     )
     ask.add_argument(
         "--sources",
@@ -148,6 +164,13 @@ def format_trace(result: RunResult) -> str:
         )
     else:
         lines.append(f"triage        {result.triage_status}")
+    if result.computation_verdict != "not_run":
+        check_line = f"check         {result.computation_verdict} on {result.computation_check_tier}"
+        if result.computation_check_confidence is not None:
+            check_line += f" (confidence {result.computation_check_confidence:.2f})"
+        if result.computation_check_reason:
+            check_line += f" - {' '.join(result.computation_check_reason.split())}"
+        lines.append(check_line)
     if result.auto_reason:
         lines.append(f"mode          {result.mode} ({result.auto_reason})")
     else:
@@ -202,6 +225,10 @@ def format_trace(result: RunResult) -> str:
             lines.append(run_line)
         if result.repair_error_type:
             lines.append(f"repair        failed ({result.repair_error_type})")
+    if result.mode == "route" and result.execution_status == "failed":
+        lines.append("execution     failed; the answer is one closed-book call, NOT VERIFIED")
+        if result.execution_note:
+            lines.append(f"              {' '.join(result.execution_note.split())[:600]}")
     if result.mode in ("openbook", "stuffed"):
         lines.append(f"sources       {result.sources_count}")
     if result.mode == "openbook":
@@ -273,6 +300,15 @@ def _mode_from_arguments(arguments: argparse.Namespace) -> str:
     return "auto"
 
 
+def _computation_check_from_arguments(arguments: argparse.Namespace) -> bool | None:
+    """True or False when a flag was given, None to use auto.computation_check."""
+    if arguments.computation_check:
+        return True
+    if arguments.no_computation_check:
+        return False
+    return None
+
+
 def run_ask(arguments: argparse.Namespace) -> int:
     if arguments.chain and arguments.sources:
         print("error: --chain and --sources cannot be combined", file=sys.stderr)
@@ -289,6 +325,9 @@ def run_ask(arguments: argparse.Namespace) -> int:
             "--sources, --triage-tier or --verifier-tier",
             file=sys.stderr,
         )
+        return EXIT_USAGE
+    if arguments.computation_check and arguments.no_computation_check:
+        print("error: --computation-check and --no-computation-check cannot be combined", file=sys.stderr)
         return EXIT_USAGE
     if arguments.require_citations and not arguments.sources:
         print(
@@ -309,6 +348,7 @@ def run_ask(arguments: argparse.Namespace) -> int:
             require_citations=arguments.require_citations,
             cross_check=True if arguments.cross_check else None,
             cross_check_tier=arguments.cross_check_tier,
+            computation_check=_computation_check_from_arguments(arguments),
         )
         result = harness.answer(request)
     except (
