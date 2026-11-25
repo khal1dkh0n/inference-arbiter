@@ -39,7 +39,10 @@ The open-book suite does not run unless every corpus file matches the manifest h
 
 Grading rules are in eval/README.md and eval/openbook/README.md and implemented in
 inference_arbiter.grading. Results go to a timestamped JSON under data/eval/ and telemetry to
-data/eval/telemetry.db. The closed-book suite also writes the cheapest tier measured correct
+data/eval/telemetry.db. The result file is rewritten after every case with the records so
+far (`complete: false`, no scorecard), so a run that is killed keeps what it finished;
+--regrade on that file gives its scorecard. The closed-book suite also writes the
+cheapest tier measured correct
 for each case to data/eval/measured_routes.json, but only when the results cover every tier
 the routes are derived from.
 """
@@ -50,6 +53,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shutil
 import sqlite3
 import sys
@@ -1087,18 +1091,29 @@ def run_strategies(
     progress: Callable[[dict[str, Any]], None] | None = None,
     case_runner: Callable[..., dict[str, Any]] | None = None,
     reference_runner: ReferenceRunner | None = None,
+    checkpoint: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run every strategy over every case. Stops cleanly once the cost cap is passed.
 
     case_runner(harness, strategy, case, judge) replaces the closed-book run_case; the
     open-book suite passes one bound to its corpus. reference_runner runs a program in
-    the sandbox for the code set's reference tests.
+    the sandbox for the code set's reference tests. checkpoint is called after every
+    case with the run so far, in the shape this function returns.
     """
     records: list[dict[str, Any]] = []
     not_runnable: dict[str, str] = {}
     cumulative_cost_usd = 0.0
     stopped_early = False
     stop_reason: str | None = None
+
+    def run_so_far() -> dict[str, Any]:
+        return {
+            "records": records,
+            "not_runnable": not_runnable,
+            "cumulative_cost_usd": round(cumulative_cost_usd, 8),
+            "stopped_early": stopped_early,
+            "stop_reason": stop_reason,
+        }
 
     for strategy in strategies:
         if stopped_early:
@@ -1132,16 +1147,12 @@ def run_strategies(
                 break
             records.append(record)
             cumulative_cost_usd += record["cost_usd"] + record["judge_cost_usd"]
+            if checkpoint is not None:
+                checkpoint(run_so_far())
             if progress is not None:
                 progress(record)
 
-    return {
-        "records": records,
-        "not_runnable": not_runnable,
-        "cumulative_cost_usd": round(cumulative_cost_usd, 8),
-        "stopped_early": stopped_early,
-        "stop_reason": stop_reason,
-    }
+    return run_so_far()
 
 
 def percentile(values: list[float], percent: float) -> float | None:
@@ -2393,6 +2404,52 @@ def main(argv: list[str] | None = None) -> int:
         return run_openbook_case(harness, strategy, case, case_judge, corpus, arguments.verifier_tier)
 
     run_started_at = time.monotonic()
+
+    def write_result(
+        run_state: dict[str, Any],
+        result_records: list[dict[str, Any]],
+        result_scorecard: dict[str, Any] | None,
+        result_merged_files: list[str],
+        complete: bool,
+    ) -> None:
+        # Written beside the result and renamed over it, so a kill in the middle of a write
+        # leaves the previous file whole.
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = out_path.with_name(out_path.name + ".tmp")
+        temporary_path.write_text(
+            json.dumps(
+                {
+                    "started_utc": started_utc.isoformat(timespec="seconds"),
+                    "elapsed_s": round(time.monotonic() - run_started_at, 1),
+                    "complete": complete,
+                    "suite": arguments.suite,
+                    "golden": golden_info,
+                    "config_sha256": config.sha256,
+                    "strategies": [strategy.name for strategy in strategies],
+                    "case_ids": [case["id"] for case in cases],
+                    "judge_tier": arguments.judge_tier,
+                    "judge_model": judge.model,
+                    "triage_tier": arguments.triage_tier or config.triage_tier,
+                    "verifier_tier": arguments.verifier_tier,
+                    "max_cost_usd": arguments.max_cost_usd,
+                    "cumulative_cost_usd": run_state["cumulative_cost_usd"],
+                    "regraded_from": arguments.regrade,
+                    "stopped_early": run_state["stopped_early"],
+                    "stop_reason": run_state["stop_reason"],
+                    "not_runnable": run_state["not_runnable"],
+                    "merged_files": result_merged_files,
+                    "scorecard": result_scorecard,
+                    "records": result_records,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, out_path)
+
+    def write_partial_result(run_state: dict[str, Any]) -> None:
+        write_result(run_state, run_state["records"], None, [], complete=False)
+
     if arguments.regrade:
         prior = json.loads(Path(arguments.regrade).read_text(encoding="utf-8"))
         if not same_question_set(prior.get("golden", {}), golden_info):
@@ -2432,6 +2489,7 @@ def main(argv: list[str] | None = None) -> int:
             progress=_progress_line,
             case_runner=openbook_case_runner if openbook_suite else None,
             reference_runner=reference_runner,
+            checkpoint=write_partial_result,
         )
 
     all_records, merged_files, merge_warnings = merge_prior_records(run["records"], arguments.merge, golden_info)
@@ -2448,35 +2506,7 @@ def main(argv: list[str] | None = None) -> int:
         route_gaps = route_coverage_gaps(all_cases, all_records)
         has_tier_results = any(record["strategy"].startswith("tier:") for record in all_records)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(
-            {
-                "started_utc": started_utc.isoformat(timespec="seconds"),
-                "elapsed_s": round(time.monotonic() - run_started_at, 1),
-                "suite": arguments.suite,
-                "golden": golden_info,
-                "config_sha256": config.sha256,
-                "strategies": [strategy.name for strategy in strategies],
-                "case_ids": [case["id"] for case in cases],
-                "judge_tier": arguments.judge_tier,
-                "judge_model": judge.model,
-                "triage_tier": arguments.triage_tier or config.triage_tier,
-                "verifier_tier": arguments.verifier_tier,
-                "max_cost_usd": arguments.max_cost_usd,
-                "cumulative_cost_usd": run["cumulative_cost_usd"],
-                "regraded_from": arguments.regrade,
-                "stopped_early": run["stopped_early"],
-                "stop_reason": run["stop_reason"],
-                "not_runnable": run["not_runnable"],
-                "merged_files": merged_files,
-                "scorecard": scorecard,
-                "records": all_records,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    write_result(run, all_records, scorecard, merged_files, complete=True)
 
     for warning in merge_warnings:
         print(f"warning: {warning}")

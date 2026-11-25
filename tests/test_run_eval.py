@@ -313,6 +313,26 @@ def test_cost_cap_stops_cleanly_after_the_cap_is_passed():
     assert len(factory.harnesses) == 1
 
 
+def test_checkpoint_gets_the_run_so_far_after_every_case():
+    factory = harness_answering({"mid": CORRECT_ANSWERS}, cost_usd=0.01)
+    seen: list[tuple[list[str], float]] = []
+
+    def checkpoint(run_state):
+        seen.append(([row["case_id"] for row in run_state["records"]], run_state["cumulative_cost_usd"]))
+
+    run_eval.run_strategies(
+        CASES, [run_eval.parse_strategy("tier:mid")], factory, FakeJudge(), checkpoint=checkpoint
+    )
+
+    assert [case_ids for case_ids, _ in seen] == [
+        ["LK-01"],
+        ["LK-01", "CD-01"],
+        ["LK-01", "CD-01", "RS-01"],
+        ["LK-01", "CD-01", "RS-01", "DM-01"],
+    ]
+    assert seen[0][1] == pytest.approx(0.01)
+
+
 def test_cost_cap_counts_judge_cost():
     factory = harness_answering({"mid": {**CORRECT_ANSWERS}})
     rubric_first = [CASES[3], CASES[0], CASES[1]]
@@ -804,6 +824,67 @@ def closed_book_main(monkeypatch, tmp_path):
         ]
 
     return arguments, routes_path
+
+
+class ProcessKilled(BaseException):
+    """Stands in for a kill: nothing in the runner catches it."""
+
+
+def test_main_keeps_the_finished_cases_of_a_run_that_is_killed(closed_book_main, monkeypatch, tmp_path):
+    arguments, _ = closed_book_main
+    out_path = tmp_path / "out.json"
+
+    def responder(case_id, request):
+        if case_id == "RS-01":
+            raise ProcessKilled()
+        return fake_result(CORRECT_ANSWERS[case_id], request.tier)
+
+    monkeypatch.setattr(run_eval, "build_harness", lambda **harness_arguments: FakeHarness(responder))
+
+    with pytest.raises(ProcessKilled):
+        run_eval.main(arguments("tier:mid"))
+
+    partial = json.loads(out_path.read_text(encoding="utf-8"))
+    assert partial["complete"] is False
+    assert partial["scorecard"] is None
+    assert [row["case_id"] for row in partial["records"]] == ["LK-01"]
+    assert partial["records"][0]["outcome"] == "pass"
+    assert not (tmp_path / "out.json.tmp").exists()
+
+
+def test_main_regrades_the_file_a_killed_run_left(closed_book_main, monkeypatch, tmp_path):
+    arguments, _ = closed_book_main
+    partial_path = tmp_path / "out.json"
+    regraded_path = tmp_path / "regraded.json"
+
+    def responder(case_id, request):
+        if case_id == "RS-01":
+            raise ProcessKilled()
+        return fake_result(CORRECT_ANSWERS[case_id], request.tier)
+
+    monkeypatch.setattr(run_eval, "build_harness", lambda **harness_arguments: FakeHarness(responder))
+    with pytest.raises(ProcessKilled):
+        run_eval.main(arguments("tier:mid"))
+
+    regrade_arguments = arguments("tier:mid", extra=("--regrade", str(partial_path)))
+    regrade_arguments[regrade_arguments.index("--out") + 1] = str(regraded_path)
+    assert run_eval.main(regrade_arguments) == 0
+
+    regraded = json.loads(regraded_path.read_text(encoding="utf-8"))
+    assert regraded["complete"] is True
+    assert [row["case_id"] for row in regraded["records"]] == ["LK-01"]
+    assert regraded["scorecard"]["strategies"][0]["cases"] == 1
+
+
+def test_main_marks_a_finished_run_complete(closed_book_main, tmp_path):
+    arguments, _ = closed_book_main
+
+    assert run_eval.main(arguments("tier:mid")) == 0
+
+    result = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    assert result["complete"] is True
+    assert result["scorecard"] is not None
+    assert [row["case_id"] for row in result["records"]] == ["LK-01", "RS-01"]
 
 
 def test_main_does_not_overwrite_measured_routes_from_a_run_that_lacks_tiers(closed_book_main, capsys):

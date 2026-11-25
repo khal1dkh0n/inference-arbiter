@@ -52,7 +52,7 @@ Rubric cases carry the most grader noise. Before trusting a Phase 2 scorecard, h
 
 ## Running the eval
 
-`scripts/run_eval.py` runs strategies over this set, grades them and prints a scorecard. Results go to a timestamped JSON under `data/eval/` and telemetry to `data/eval/telemetry.db`, separate from normal use.
+`scripts/run_eval.py` runs strategies over this set, grades them and prints a scorecard. Results go to a timestamped JSON under `data/eval/` (rewritten after every case with the records so far and `complete: false`, so a run that is killed keeps what it finished; `--regrade` on that file gives its scorecard) and telemetry to `data/eval/telemetry.db`, separate from normal use.
 
 | Strategy | Meaning |
 | --- | --- |

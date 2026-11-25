@@ -12,8 +12,8 @@ Three strategies were planned. Two finished:
 - `codetest:mid+local`: solution and repair on `mid` (kimi-k3.1-pro:cloud), interface and
   tests on `local` (qwen3 14b). This is the shipped `code_test:` block.
 
-`codetest:mid+mid` did not finish: the run was stopped twice and the runner writes its
-records only at the end, so no record exists for it. Its only trace is a log of 12 cases,
+`codetest:mid+mid` did not finish: the run was stopped twice and the runner at that time
+wrote its records only at the end, so no record exists for it. Its only trace is a log of 12 cases,
 all graded pass by the reference tests, which says nothing about its generated tests.
 Whether `mid` writes better tests than `local` is not measured.
 
