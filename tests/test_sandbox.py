@@ -280,7 +280,7 @@ def test_a_sandbox_that_was_never_created_counts_as_removed(fake):
 
 
 def test_removal_only_ever_names_a_prefixed_sandbox(fake):
-    assert sandbox._remove(fake, SandboxLimits(), "gov-lab-agent") is False
+    assert sandbox._remove(fake, SandboxLimits(), "another-sandbox") is False
     assert sandbox._remove(fake, SandboxLimits(), "someone-elses-sandbox") is False
     assert fake.commands == []
 
