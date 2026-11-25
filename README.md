@@ -918,7 +918,11 @@ text came from), `plan_status`, `documents_listed`, `documents_read`,
 `tool_server_stopped` and one `tool_calls` entry per call the gate saw. The trace prints
 one line per tool call with who asked for it (`code` or `plan`).
 
-Not measured: this mode has not been run with a live model. See "Known limits".
+First run with a live model, 2026-11-24 (three cases, one run each,
+`eval/results/2026-11-24-mcp-smoke.md`): every plan was valid, the gate refused none of
+11 tool calls and the server stopped each time. Two cases passed. In the third the plan
+left out the document that held the answer and the run abstained on an answerable
+question. See "Known limits".
 
 ## Phase 2 status
 
@@ -1042,15 +1046,19 @@ output. The sha256 of the config file is stored with every run.
 
 ## Known limits
 
-- Mcp mode has not been run with a live model and has no scorecard. Everything about it
-  is covered by tests with fake model clients; the server, the gate and the stdio session
-  are also tested against the real server process. Not yet seen live: what plans the
-  `mid` tier writes, how often the gate refuses them, and what the mode adds in latency.
-  The plan schema holds a free-form `arguments` object, which a provider that enforces
-  strict JSON schemas may reject; the shipped plan tier (`mid`, through Ollama) is not
-  such a provider, but that too is unverified. The server is a host process confined by
-  its own path checks, not by the operating system. Only `.md` and `.txt` files are
-  served, HTML is not converted, and a document with a line longer than
+- Mcp mode has been run with a live model on three cases only
+  (`eval/results/2026-11-24-mcp-smoke.md`) and has no full scorecard. In that run one
+  plan left out the document that held the answer, which ended in an abstention on an
+  answerable question: the planning model picks documents from names and sizes alone, and
+  a document it does not pick is never searched. How often that happens is not measured.
+  No call was refused in that run, so a refused, failed or over-cap plan has only been
+  seen in tests. Everything else about the mode is covered by tests with fake model
+  clients; the server, the gate and the stdio session are also tested against the real
+  server process. The plan schema holds a free-form `arguments` object, which a provider
+  that enforces strict JSON schemas may reject; the shipped plan tier (`mid`, through
+  Ollama) is not such a provider, and the three live plans were accepted. The server is
+  a host process confined by its own path checks, not by the operating system. Only
+  `.md` and `.txt` files are served, HTML is not converted, and a document with a line longer than
   `mcp_docs.max_read_bytes` is skipped. Every chosen document is read in full on every
   run, so a large corpus means many tool calls; the large open-book corpus is out of reach.
 - Codetest mode has no scorecard yet. Its tests are written by a model: `tests_passed`

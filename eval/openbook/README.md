@@ -133,7 +133,9 @@ Notes on `mcp`:
   `tool_server_stopped`.
 - Not for the large-corpus set: every chosen document is read in full through tool calls
   on every run.
-- No scorecard yet: the strategy has not been run with a live model.
+- No full scorecard yet. A first run of three cases with a live model is recorded in
+  `eval/results/2026-11-24-mcp-smoke.md`: two passed, and one abstained on an answerable
+  case because the plan left out the document that held the answer.
 
 ## Grading
 
