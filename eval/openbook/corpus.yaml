@@ -6,8 +6,8 @@ version: 1
 documents:
 - id: build_plan
   path: inference_arbiter_architecture_build_plan.md
-  sha256: cf45c276b61dc482ff1e16c2e18f7c7f7559ac162770fe749aeac37c5a2a1bff
-  pinned_utc: '2026-11-24T06:29:02+00:00'
+  sha256: 4bf49964a37a317511a75388acecdda2855f24cde5df001f5a3574c32c5f7bbb
+  pinned_utc: '2026-11-25T18:52:51+00:00'
 - id: thread_summary
   path: inference_arbiter_thread_discussion_summary.md
   sha256: 58b5c20777ddcfb0d7519d9c6be4e3614fc84ad427b9bb9f78e96e4ab29dfde0

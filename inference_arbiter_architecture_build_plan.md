@@ -6,7 +6,7 @@
 
 **Target Machine:** Mac Studio (local Ollama / llama.cpp + OpenRouter cloud escalation)
 
-**Companion Blueprint:** `agentic_harness_architecture.html`
+**Companion Blueprint:** `inference_arbiter_architectural_flow.html`
 
 ## 1. Core Thesis & Goals
 
@@ -126,7 +126,7 @@ To keep concerns clean and prevent tool overlap on the Mac Studio, maintain **th
 
 ## 5. Companion Reference Files
 
-* `agentic_harness_architecture.html` - Interactive 3-tab architectural flow diagram with node inspector, code snippets, and animated packet simulations.
+* `inference_arbiter_architectural_flow.html` - Interactive 3-tab architectural flow diagram with node inspector, code snippets, and animated packet simulations.
 
 * `jev-router-architecture.html` - Reference breakdown of Jev Router mechanics, cache-aware effort tuning, fail-closed limits, and payments-stack analogy.
 

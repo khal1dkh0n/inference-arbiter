@@ -39,6 +39,11 @@ produced against another corpus or question file. After `--pin`, run `uv run pyt
 `tests/test_openbook_eval.py` checks every evidence quote against the files present, and
 `run_eval.py` does the same at start-up.
 
+The build plan was pinned again on 2026-11-25 after a companion file name in it was
+brought up to date. No question and no evidence quote changed, but the corpus
+fingerprint did, so `--merge` and `--regrade` refuse open-book result files written
+before that date.
+
 ## Large-corpus set
 
 `corpus_large.yaml` lists pages of the OpenRouter documentation named in its `llms.txt`
