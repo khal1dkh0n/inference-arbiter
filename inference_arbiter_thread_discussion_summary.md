@@ -36,7 +36,7 @@ A complete synthesis of the discussion moving from a critique of monolithic LLMs
 
 * **Philosophy:** Use model chaining not only to cut frontier API costs, but to deploy **"the best at their best"** (specialized, lightweight local models alongside selective cloud escalation) while avoiding opaque black boxes.
 * **Language Choice:** Start in **Python** (`openai` SDK works uniformly for Ollama and OpenRouter; `pydantic` enforces strict JSON handoffs). Java or TypeScript can be introduced later if needed.
-* **Progressive 3-Phase Architecture** *(visualized in `agentic_harness_architecture.html` and detailed in `plan.md`)*:
+* **Progressive 3-Phase Architecture** *(visualized in `inference_arbiter_architectural_flow.html` and detailed in `inference_arbiter_architecture_build_plan.md`)*:
   1. **Phase 1 - Bare-Metal Router (Local + Cloud):** One question in, one answer out, zero autonomous loops. Config-driven `models.yaml`, fast triage + deterministic Python `if/else` thresholds, and async SQLite/JSONL telemetry.
   2. **Phase 2 - Verification & Evals:** Local context prep/rewriting, **Pydantic v2 schema gates** (catch `ValidationError` -> escalate step), groundedness verification with a **bounded single Frontier repair loop**, and an offline **30-50 golden question eval harness** comparing the chain against a single direct mid-tier cloud baseline.
   3. **Phase 3 - Tool Execution & Docker Sandboxes:** Host-side tool dispatch gate crossing into ephemeral **Docker Sandboxes (`sbx` CLI) MicroVMs** (dedicated Linux kernel, private Docker engine, network allow/deny, zero host credentials) running deterministic Python/unit-test verifiers and per-sandbox **scoped MCP servers**.
@@ -95,7 +95,7 @@ No new model downloads are needed-the existing `ollama list` covers every tier o
 
 ## 7. Artifacts Produced & Next Decision Point
 
-* `agentic_harness_architecture.html` - Interactive 3-tab architectural flow diagram with clickable node inspector, code snippets, and animated packet simulations.
-* `plan.md` - Actionable architecture & 3-phase build plan with exit criteria.
-* `thread_summary.md` - This full-thread discussion recap.
+* `inference_arbiter_architectural_flow.html` - Interactive 3-tab architectural flow diagram with clickable node inspector, code snippets, and animated packet simulations.
+* `inference_arbiter_architecture_build_plan.md` - Actionable architecture & 3-phase build plan with exit criteria.
+* `inference_arbiter_thread_discussion_summary.md` - This full-thread discussion recap.
 * **Next Step:** Scaffold the **Phase 1 Python starter** (`models.yaml`, router with fail-closed fallback, Ollama/OpenRouter client, and SQLite telemetry)-choosing between a **plain CLI script** first or including the **thin FastAPI `/v1/chat/completions` proxy** from day one.

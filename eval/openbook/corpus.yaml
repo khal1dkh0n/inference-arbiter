@@ -10,8 +10,8 @@ documents:
   pinned_utc: '2026-11-25T18:57:33+00:00'
 - id: thread_summary
   path: inference_arbiter_thread_discussion_summary.md
-  sha256: 58b5c20777ddcfb0d7519d9c6be4e3614fc84ad427b9bb9f78e96e4ab29dfde0
-  pinned_utc: '2026-11-24T06:29:02+00:00'
+  sha256: fdd718f47a08d2b42fb23065e71d0f5cfe4e96e374b803f81eaed40c0d3f4780
+  pinned_utc: '2026-11-25T18:58:38+00:00'
 - id: jev_router
   path: data/corpus/jev-router.md
   url: https://openrouter.ai/docs/guides/routing/routers/jev-router.md
