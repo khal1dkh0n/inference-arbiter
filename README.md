@@ -1061,7 +1061,11 @@ output. The sha256 of the config file is stored with every run.
   `.md` and `.txt` files are served, HTML is not converted, and a document with a line longer than
   `mcp_docs.max_read_bytes` is skipped. Every chosen document is read in full on every
   run, so a large corpus means many tool calls; the large open-book corpus is out of reach.
-- Codetest mode has no scorecard yet. Its tests are written by a model: `tests_passed`
+- Codetest mode has one partial scorecard (`eval/results/2026-11-24-code-tests.md`, 20
+  cases, one run): it added no accuracy over one `mid` call, which passed every case on
+  the first attempt, and its generated tests raised a false alarm on 13 of 20 correct
+  solutions. Whether the tests catch a wrong solution is not measured, because none
+  was produced. Its tests are written by a model: `tests_passed`
   means the solution passed them, not that it is right. Solution, tests and the driver
   share one process inside the sandbox, so the result line is protected against mistakes
   (stray output, an early exit, a crash) and not against a solution written to forge it.
