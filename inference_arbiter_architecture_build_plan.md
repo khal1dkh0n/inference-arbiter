@@ -128,8 +128,6 @@ To keep concerns clean and prevent tool overlap on the Mac Studio, maintain **th
 
 * `inference_arbiter_architectural_flow.html` - Interactive 3-tab architectural flow diagram with node inspector, code snippets, and animated packet simulations.
 
-* `jev-router-architecture.html` - Reference breakdown of Jev Router mechanics, cache-aware effort tuning, fail-closed limits, and payments-stack analogy.
-
 * `HERMES_SETUP.md` / `hermes-agent-guide.md` / `USAGE.md` - Local Mac Studio Hermes v0.21.3 configuration, SerpApi setup, and operational cautions.
 
 ## 6. Immediate Next Steps (When Ready to Build Phase 1)
