@@ -96,8 +96,8 @@ without the check (17 questions sent to execution, all `verified` and right, non
 a lookup, domain or trap case; 0.78 s median added to the other 19); the hard set had 25
 of 26 sent, 23 `verified` and right, 1 `disputed`, 1 `one_sided` and right, 1 answered
 closed-book and right, and no `verified` answer wrong. A question sent to execution took
-11.3 s at the median on the golden set against 3.1 s for the plain call. The check stays
-off until the owner turns it on.
+11.3 s at the median on the golden set against 3.1 s for the plain call. The check is
+on in the shipped config.
 
 Why these defaults: on the Phase 2 suites a single `mid` call was more accurate than the
 chain at no cost, a stuffed call tied the pipeline whenever the sources fit, and the
